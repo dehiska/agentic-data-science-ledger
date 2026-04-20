@@ -28,7 +28,7 @@ st.set_page_config(
 
 APP_MODE = os.getenv("APP_MODE", "local")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8080")
-SUPPORTED_TYPES = [".ipynb", ".py", ".docx"]
+SUPPORTED_TYPES = [".ipynb", ".py", ".docx", ".json"]
 
 # ── Service layer ──────────────────────────────────────────────────────────────
 
@@ -201,11 +201,12 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_upload, tab_ledger, tab_plan, tab_costs = st.tabs([
+tab_upload, tab_ledger, tab_plan, tab_costs, tab_snippet = st.tabs([
     "📂 Upload Files",
     "📜 Ledger",
     "🤖 Agent Plan",
     "💰 Costs",
+    "📋 Notebook Snippet",
 ])
 
 # ── Tab 1: Upload ──────────────────────────────────────────────────────────────
@@ -219,10 +220,10 @@ with tab_upload:
     upload_proj_label = st.selectbox("Assign to project", list(upload_proj_options.keys()), key="upload_proj")
     upload_proj_id = upload_proj_options[upload_proj_label]
 
-    st.caption("Supported: `.ipynb` notebooks · `.py` scripts · `.docx` documents")
+    st.caption("Supported: `.ipynb` notebooks · `.py` scripts · `.docx` documents · `.json` ledger entries")
     uploaded_files = st.file_uploader(
         "Upload files",
-        type=["ipynb", "py", "docx", "doc"],
+        type=["ipynb", "py", "docx", "doc", "json"],
         accept_multiple_files=True,
         key="file_uploader",
     )
@@ -474,3 +475,139 @@ with tab_costs:
             st.plotly_chart(fig2, use_container_width=True)
 
         st.dataframe(df, use_container_width=True)
+
+# ── Tab 5: Notebook Snippet ────────────────────────────────────────────────────
+
+with tab_snippet:
+    st.header("📋 Notebook Logging Cell")
+    st.markdown(
+        "Copy this cell into the **bottom of any notebook** after training. "
+        "It saves a `*_ledger_entry.json` file next to the notebook. "
+        "Then upload that JSON here — the ledger will ingest it directly with full metrics, "
+        "model params, and preprocessing steps."
+    )
+
+    _SNIPPET = '''\
+# ═══════════════════════════════════════════════════════════════
+# AGENTIC DS LEDGER — Logging Cell
+# Run this after training to save a ledger entry JSON.
+# Then upload the JSON file in the DS Ledger dashboard.
+# ═══════════════════════════════════════════════════════════════
+import json, sys, subprocess
+from datetime import datetime
+from pathlib import Path
+
+# ── 1. Model info ────────────────────────────────────────────────
+model_info = {
+    "name": "LightGBMClassifier",          # ← change to your model name
+    "family": "Gradient Boosting",
+    "params": params,                       # ← your params dict
+    "best_iteration": last_model.best_iteration,
+    "feature_importance": {
+        "gain":  last_model.feature_importance(importance_type="gain").tolist(),
+        "split": last_model.feature_importance(importance_type="split").tolist(),
+        "features": feature_cols,
+    },
+}
+
+# ── 2. Preprocessing steps ───────────────────────────────────────
+preprocessing_steps = [
+    {
+        "name": "Drop invalid labels",
+        "type": "Data Cleaning",
+        "description": "Removed rows where cancel == -1",
+        "code": "train = train[train[\\'cancel\\'] != -1].copy()",
+    },
+    {
+        "name": "Categorical Encoding",
+        "type": "Feature Engineering",
+        "description": "Cast categorical columns to \\'category\\' dtype for LightGBM",
+        "code": "for col in cat_cols: X[col] = X[col].astype(\\'category\\')",
+    },
+    {
+        "name": "Class Weighting",
+        "type": "Imbalance Handling",
+        "description": "Applied sample weights to handle class imbalance",
+        "code": "sample_weights[y == c] = w",
+    },
+    {
+        "name": "StratifiedKFold",
+        "type": "Cross Validation",
+        "description": "5-fold stratified cross-validation",
+        "code": "StratifiedKFold(n_splits=5, shuffle=True, random_state=42)",
+    },
+]
+
+# ── 3. Metrics ───────────────────────────────────────────────────
+oof_class = oof_preds.argmax(axis=1)
+metrics = [
+    {
+        "name": "OOF Accuracy",
+        "value": float(f"{accuracy_score(y, oof_class):.4f}"),
+        "function": "accuracy_score",
+    },
+    {
+        "name": "Mean CV Accuracy",
+        "value": float(f"{np.mean(fold_accs):.4f}"),
+        "std":   float(f"{np.std(fold_accs):.4f}"),
+        "function": "np.mean(fold_accs)",
+    },
+    {
+        "name": "Classification Report",
+        "value": classification_report(
+            y, oof_class,
+            target_names=["Not Cancel (0)", "May Cancel (1)", "Cancel (2)"],
+            output_dict=True,
+        ),
+        "function": "classification_report",
+    },
+]
+
+# ── 4. Environment ───────────────────────────────────────────────
+environment = {
+    "python_version": sys.version,
+    "pip_freeze": subprocess.check_output(
+        [sys.executable, "-m", "pip", "freeze"]
+    ).decode().splitlines(),
+}
+
+# ── 5. Assemble & save ───────────────────────────────────────────
+notebook_name = Path(__file__).stem if "__file__" in dir() else "notebook"
+ledger_entry = {
+    "file_path":    f"{notebook_name}.ipynb",
+    "timestamp":    datetime.now().isoformat(),
+    "team_member":  "your_name_here",       # ← change this
+    "models":       [model_info],
+    "metrics":      metrics,
+    "preprocessing": preprocessing_steps,
+    "environment":  environment,
+}
+
+output_path = f"{notebook_name}_ledger_entry.json"
+with open(output_path, "w") as f:
+    json.dump(ledger_entry, f, indent=2, default=str)
+
+print(f"✅ Ledger entry saved → {output_path}")
+print(f"   Models: {len(ledger_entry[\\'models\\'])}")
+print(f"   Metrics: {len(ledger_entry[\\'metrics\\'])}")
+print(f"   Preprocessing: {len(ledger_entry[\\'preprocessing\\'])}")
+'''
+
+    st.code(_SNIPPET, language="python")
+
+    st.divider()
+    st.subheader("How to use it")
+    st.markdown("""
+1. **Copy** the cell above into the bottom of your notebook (after training completes)
+2. **Edit** the 3 marked lines: model name, `params` variable, `team_member`
+3. **Run** the cell — it saves `<notebook_name>_ledger_entry.json` next to your notebook
+4. **Upload** that `.json` file in the **Upload Files** tab
+5. The ledger will show full model params, OOF accuracy, per-class metrics, and all preprocessing steps
+""")
+
+    st.info(
+        "💡 If the JSON file is saved **next to** the `.ipynb` with the name "
+        "`<notebook>_ledger_entry.json`, uploading the notebook itself will also "
+        "auto-detect and use the JSON instead of AST-parsing.",
+        icon="💡",
+    )

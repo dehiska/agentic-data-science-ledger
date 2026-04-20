@@ -158,13 +158,19 @@ class MCPServer:
         """Dispatch to the correct parser based on file extension."""
         ext = Path(file_path).suffix.lower()
         if ext == ".ipynb":
+            # Check for a hand-crafted ledger entry JSON alongside the notebook
+            json_sidecar = str(file_path).replace(".ipynb", "_ledger_entry.json")
+            if Path(json_sidecar).exists():
+                return self._parse_json(json_sidecar)
             return self._parse_notebook(file_path, repo_name, branch)
         elif ext == ".py":
             return self._parse_py(file_path)
         elif ext in (".docx", ".doc"):
             return self._parse_docx(file_path)
+        elif ext == ".json":
+            return self._parse_json(file_path)
         else:
-            raise ValueError(f"Unsupported file type: {ext}. Supported: .ipynb, .py, .docx")
+            raise ValueError(f"Unsupported file type: {ext}. Supported: .ipynb, .py, .docx, .json")
 
     # Keep old name for backwards compatibility
     def parse_notebook(self, file_path: str, repo_name=None, branch="main", team_member=None) -> Dict:
@@ -266,6 +272,37 @@ class MCPServer:
         meta["preprocessing"] = cell_meta["preprocessing"]
         self._extract_source_patterns(source, meta)
         return meta
+
+    # ── .json ledger entry parser ──────────────────────────────────────────────
+
+    def _parse_json(self, file_path: str) -> Dict:
+        """
+        Ingest a hand-crafted *_ledger_entry.json file directly into the ledger.
+
+        The JSON must match the schema produced by the notebook logging cell:
+          { file_path, models, metrics, preprocessing, environment, timestamp, ... }
+
+        Any missing fields default to empty lists/dicts so partial entries work.
+        """
+        import json as _json
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+
+        # Normalise: ensure all required keys exist
+        return {
+            "file_path": data.get("file_path", str(file_path)),
+            "file_type": "json",
+            "cells": [],
+            "environment": data.get("environment", {}),
+            "models": data.get("models", []),
+            "metrics": data.get("metrics", []),
+            "preprocessing": data.get("preprocessing", []),
+            "raw_text": _json.dumps(data, indent=2)[:10000],
+            # Pass through any extra fields (team_member, timestamp, etc.)
+            **{k: v for k, v in data.items()
+               if k not in ("file_path", "environment", "models",
+                            "metrics", "preprocessing")},
+        }
 
     # ── .docx parser ───────────────────────────────────────────────────────────
 
