@@ -1,0 +1,286 @@
+"""
+FastAPI Backend — REST API for the Agentic DS Ledger.
+
+Run with:
+    uvicorn backend.api:app --reload --port 8080
+
+Endpoints:
+  POST /projects                     — Create a new project
+  GET  /projects                     — List all projects
+  GET  /projects/{id}                — Get single project
+  DELETE /projects/{id}              — Delete a project
+  POST /files/parse                  — Upload + parse .ipynb / .py / .docx
+  POST /files/parse-local            — Parse by local path
+  GET  /ledger                       — List ledger entries (filter by project_id)
+  GET  /ledger/{entry_id}            — Get single entry
+  POST /plan/generate                — Generate a multi-agent plan
+  POST /autoresearch/run             — Run (or simulate) autoresearch
+  GET  /costs                        — List cost logs
+  GET  /health                       — Health check
+"""
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from fastapi import FastAPI, File, HTTPException, UploadFile, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from src.database import get_db
+from src.mcp_server import MCPServer
+from src.multi_agent_orchestrator import MultiAgentOrchestrator
+from src.rag_system import RAGSystem
+
+# ── App setup ──────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Agentic DS Ledger API",
+    description="Backend for the Agentic DS Ledger.",
+    version="1.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+SUPPORTED_TYPES = {".ipynb", ".py", ".docx", ".doc"}
+
+# ── Singletons ─────────────────────────────────────────────────────────────────
+
+_db = None
+_rag = None
+_orchestrator = None
+_mcp = None
+
+
+def get_services():
+    global _db, _rag, _orchestrator, _mcp
+    if _db is None:
+        _db = get_db()
+    if _rag is None:
+        try:
+            _rag = RAGSystem()
+        except Exception:
+            _rag = None
+    if _orchestrator is None:
+        _orchestrator = MultiAgentOrchestrator(
+            db=_db, rag=_rag,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            github_token=os.getenv("GITHUB_TOKEN"),
+        )
+    if _mcp is None:
+        _mcp = MCPServer(db=_db)
+    return _db, _rag, _orchestrator, _mcp
+
+
+# ── Request models ─────────────────────────────────────────────────────────────
+
+class CreateProjectRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+class ParseLocalRequest(BaseModel):
+    file_path: str
+    project_id: Optional[int] = None
+    repo_name: Optional[str] = None
+    branch: str = "main"
+    team_member: Optional[str] = None
+
+
+class PlanRequest(BaseModel):
+    file_path: str
+    goal: str = "Improve model performance"
+    project_id: Optional[int] = None
+    repo_name: Optional[str] = None
+    branch: str = "main"
+    team_member: Optional[str] = None
+    execute_autoresearch: bool = False
+
+
+class AutoresearchRequest(BaseModel):
+    file_path: str
+    goal: str = "Improve model accuracy"
+    project_id: Optional[int] = None
+    repo_name: Optional[str] = None
+    branch: str = "main"
+    team_member: Optional[str] = None
+
+
+# ── Health ─────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "mode": os.getenv("APP_MODE", "local")}
+
+
+# ── Projects ───────────────────────────────────────────────────────────────────
+
+@app.post("/projects", status_code=201)
+def create_project(req: CreateProjectRequest):
+    db, _, _, _ = get_services()
+    try:
+        project_id = db.create_project(req.name, req.description)
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(409, f"Project '{req.name}' already exists.")
+        raise HTTPException(400, str(e))
+    return {"id": project_id, "name": req.name, "description": req.description}
+
+
+@app.get("/projects")
+def list_projects():
+    db, _, _, _ = get_services()
+    return {"projects": db.get_projects()}
+
+
+@app.get("/projects/{project_id}")
+def get_project(project_id: int):
+    db, _, _, _ = get_services()
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, f"Project {project_id} not found.")
+    entries = db.get_ledger_entries(project_id=project_id)
+    return {**project, "files": entries}
+
+
+@app.delete("/projects/{project_id}")
+def delete_project(project_id: int):
+    db, _, _, _ = get_services()
+    if not db.get_project(project_id):
+        raise HTTPException(404, f"Project {project_id} not found.")
+    db.delete_project(project_id)
+    return {"status": "deleted", "id": project_id}
+
+
+# ── File parsing ───────────────────────────────────────────────────────────────
+
+@app.post("/files/parse")
+async def parse_file_upload(
+    file: UploadFile = File(...),
+    project_id: Optional[int] = Query(None),
+    team_member: Optional[str] = Query(None),
+):
+    """Upload .ipynb / .py / .docx → parse → store in ledger under a project."""
+    db, _, _, mcp = get_services()
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in SUPPORTED_TYPES:
+        raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {', '.join(SUPPORTED_TYPES)}")
+
+    content = await file.read()
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="wb") as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        metadata = mcp.parse_file(tmp_path)
+        metadata["file_path"] = file.filename
+        entry_id = mcp.store_in_db(metadata, project_id=project_id)
+        return {
+            "status": "ok",
+            "file": file.filename,
+            "file_type": ext.lstrip("."),
+            "project_id": project_id,
+            "entry_id": entry_id,
+            "models_found": len(metadata.get("models", [])),
+            "metrics_found": len(metadata.get("metrics", [])),
+            "preprocessing_found": len(metadata.get("preprocessing", [])),
+            "word_count": metadata.get("word_count"),
+            "doc_keywords": metadata.get("doc_keywords"),
+            "metadata": metadata,
+        }
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+@app.post("/files/parse-local")
+def parse_file_local(req: ParseLocalRequest):
+    db, _, _, mcp = get_services()
+    if not Path(req.file_path).exists():
+        raise HTTPException(404, f"File not found: {req.file_path}")
+    metadata = mcp.parse_file(req.file_path, req.repo_name, req.branch, req.team_member)
+    entry_id = mcp.store_in_db(metadata, project_id=req.project_id)
+    return {"status": "ok", "entry_id": entry_id, "models_found": len(metadata.get("models", [])), "metadata": metadata}
+
+
+# Keep old endpoint working
+@app.post("/notebooks/parse")
+async def parse_notebook_upload(file: UploadFile = File(...), team_member: Optional[str] = None):
+    return await parse_file_upload(file=file, project_id=None, team_member=team_member)
+
+@app.post("/notebooks/parse-local")
+def parse_notebook_local(req: ParseLocalRequest):
+    return parse_file_local(req)
+
+
+# ── Ledger ─────────────────────────────────────────────────────────────────────
+
+@app.get("/ledger")
+def list_ledger(
+    file_path: Optional[str] = None,
+    project_id: Optional[int] = None,
+    github_repo: Optional[str] = None,
+):
+    db, _, _, _ = get_services()
+    try:
+        entries = db.get_ledger_entries(file_path=file_path, project_id=project_id)
+    except TypeError:
+        entries = db.get_ledger_entries(file_path=file_path)
+    return {"entries": entries, "count": len(entries)}
+
+
+@app.get("/ledger/{entry_id}")
+def get_ledger_entry(entry_id: int):
+    db, _, _, _ = get_services()
+    for e in db.get_ledger_entries():
+        if e.get("id") == entry_id:
+            return e
+    raise HTTPException(404, f"Entry {entry_id} not found.")
+
+
+# ── Planning ───────────────────────────────────────────────────────────────────
+
+@app.post("/plan/generate")
+def generate_plan(req: PlanRequest):
+    _, _, orchestrator, _ = get_services()
+    return orchestrator.run_pipeline(
+        file_path=req.file_path, goal=req.goal,
+        repo_name=req.repo_name, branch=req.branch,
+        team_member=req.team_member, execute_autoresearch=req.execute_autoresearch,
+    )
+
+
+@app.post("/autoresearch/run")
+def run_autoresearch(req: AutoresearchRequest):
+    from src.autoresearch_wrapper import AutoResearchWrapper
+    db, _, _, _ = get_services()
+    wrapper = AutoResearchWrapper(db=db, github_token=os.getenv("GITHUB_TOKEN"))
+    return wrapper.run_autoresearch(
+        repo_name=req.repo_name or "", file_path=req.file_path,
+        branch=req.branch, goal=req.goal, team_member=req.team_member, execute=True,
+    )
+
+
+# ── Costs ──────────────────────────────────────────────────────────────────────
+
+@app.get("/costs")
+def get_costs():
+    db, _, _, _ = get_services()
+    return {"costs": db.get_costs()}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.api:app", host="0.0.0.0", port=8080, reload=True)

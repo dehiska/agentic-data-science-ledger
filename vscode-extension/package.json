@@ -1,0 +1,105 @@
+{
+  "name": "agentic-ds-ledger",
+  "displayName": "Agentic DS Ledger",
+  "description": "Auto-parse .ipynb / .py / .docx and track DS experiments in a project ledger",
+  "version": "0.1.0",
+  "publisher": "agentic-ds",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other", "Machine Learning"],
+  "activationEvents": [
+    "onView:agenticLedgerView",
+    "onLanguage:python",
+    "onLanguage:jupyter-notebook",
+    "onCommand:agenticLedger.parseFile",
+    "onCommand:agenticLedger.createProject"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agenticLedger.parseFile",
+        "title": "Ledger: Parse Current File",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "agenticLedger.createProject",
+        "title": "Ledger: Create Project",
+        "icon": "$(add)"
+      },
+      {
+        "command": "agenticLedger.openDashboard",
+        "title": "Ledger: Open Streamlit Dashboard"
+      },
+      {
+        "command": "agenticLedger.refreshTree",
+        "title": "Ledger: Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "agenticLedgerView",
+          "name": "DS Ledger",
+          "icon": "$(beaker)",
+          "contextualTitle": "Agentic DS Ledger"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "agenticLedger.refreshTree",
+          "when": "view == agenticLedgerView",
+          "group": "navigation"
+        },
+        {
+          "command": "agenticLedger.createProject",
+          "when": "view == agenticLedgerView",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "agenticLedger.parseFile",
+          "group": "navigation",
+          "when": "resourceExtname == .ipynb || resourceExtname == .py || resourceExtname == .docx"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agentic DS Ledger",
+      "properties": {
+        "agenticLedger.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to the Python interpreter where agentic-ds-ledger is installed. Use 'python3' on Mac/Linux if needed."
+        },
+        "agenticLedger.dbPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the ledger.db SQLite file. Defaults to ledger.db in the workspace root."
+        },
+        "agenticLedger.defaultProject": {
+          "type": "string",
+          "default": "Default",
+          "description": "Default project name used when auto-parsing on save."
+        },
+        "agenticLedger.autoParseOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically parse .ipynb / .py / .docx files when saved."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
