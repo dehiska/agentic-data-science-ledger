@@ -233,7 +233,7 @@ class MCPServer:
             meta["metrics"].extend(cell_meta["metrics"])
             meta["preprocessing"].extend(cell_meta["preprocessing"])
 
-        meta["raw_text"] = "\n".join(all_source)[:5000]
+        meta["raw_text"] = "\n".join(all_source)[:10000]
         self._extract_source_patterns(meta["raw_text"], meta)
         return meta
 
@@ -249,7 +249,7 @@ class MCPServer:
             "models": [],
             "metrics": [],
             "preprocessing": [],
-            "raw_text": source[:5000],
+            "raw_text": source[:10000],
         }
         try:
             tree = ast.parse(source)
@@ -430,14 +430,43 @@ class MCPServer:
                         "args": [], "source": f"params dict: metric={part}",
                     })
 
-        # ── Models: LightGBM / XGBoost 'objective' key → annotate family ──────
+        # ── Models: regex fallback for framework training calls ───────────────
+        # Catches lgb.train(), xgb.train() etc. when AST walk misses them
+        # (e.g. large cells where lgb.train is deep inside a for-loop body
+        # and the cell source was truncated before reaching it in raw_text)
+        fw_regex = [
+            (r"\blgb\.train\s*\(",      "LightGBM",    "Ensemble"),
+            (r"\blgb\.cv\s*\(",         "LightGBM CV", "Ensemble"),
+            (r"\blightgbm\.train\s*\(", "LightGBM",    "Ensemble"),
+            (r"\bxgb\.train\s*\(",      "XGBoost",     "Ensemble"),
+            (r"\bxgb\.cv\s*\(",         "XGBoost CV",  "Ensemble"),
+            (r"\bxgboost\.train\s*\(",  "XGBoost",     "Ensemble"),
+            (r"\bcatboost\.train\s*\(", "CatBoost",    "Ensemble"),
+        ]
+        for pattern, name, family in fw_regex:
+            if re.search(pattern, source):
+                if not any(m.get("name") == name for m in meta["models"]):
+                    meta["models"].append({
+                        "name": name, "family": family,
+                        "params": {}, "source": "regex",
+                    })
+
+        # ── Models: LightGBM / XGBoost 'objective' key → annotate/create ─────
         for obj in re.findall(r"['\"]objective['\"]\s*:\s*['\"]([^'\"]+)['\"]", source):
             family = self.OBJECTIVE_FAMILY.get(obj, f"Ensemble ({obj})")
-            # Patch the family on any unnamed LightGBM/XGBoost model already found
+            patched = False
             for m in meta["models"]:
-                if m.get("name") in ("LightGBM", "XGBoost", "LightGBM CV", "XGBoost CV"):
+                if m.get("name") in ("LightGBM", "XGBoost", "LightGBM CV", "XGBoost CV",
+                                     "CatBoost"):
                     m["family"] = family
                     m.setdefault("params", {})["objective"] = obj
+                    patched = True
+            # If nothing was found at all, create a generic entry from the objective
+            if not patched and obj in self.OBJECTIVE_FAMILY:
+                meta["models"].append({
+                    "name": "GradientBoosting", "family": family,
+                    "params": {"objective": obj}, "source": "objective key",
+                })
 
     def _extract_environment(self) -> Dict:
         try:
