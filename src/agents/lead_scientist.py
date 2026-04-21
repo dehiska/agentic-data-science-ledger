@@ -52,9 +52,8 @@ class LeadScientistAgent(BaseAgent):
         return self.propose_plan(context, context.get("goal", "Improve model performance"))
 
     def propose_plan(self, ledger_state: Dict, goal: str) -> Dict:
-        models = ledger_state.get("models", [])
-        metrics = ledger_state.get("metrics", [])
-        preprocessing = ledger_state.get("preprocessing", [])
+        # Prefer user-corrected data (approved=True) over raw AST extraction
+        models, metrics, preprocessing = self._effective_data(ledger_state)
 
         model_families = list({m.get("family", "Unknown") for m in models})
         metric_names = [m.get("name", "") for m in metrics]
@@ -71,6 +70,27 @@ class LeadScientistAgent(BaseAgent):
 
         # Rule-based fallback
         return self._rule_based_plan(models, metrics, preprocessing, goal, model_families)
+
+    def _effective_data(self, entry: Dict):
+        """Return (models, metrics, preprocessing), preferring user_corrected when approved."""
+        import json as _json
+        if entry.get("approved") and entry.get("user_corrected"):
+            uc = entry["user_corrected"]
+            if isinstance(uc, str):
+                try:
+                    uc = _json.loads(uc)
+                except Exception:
+                    uc = {}
+            return (
+                uc.get("models", entry.get("models", [])),
+                uc.get("metrics", entry.get("metrics", [])),
+                uc.get("preprocessing", entry.get("preprocessing", [])),
+            )
+        return (
+            entry.get("models", []),
+            entry.get("metrics", []),
+            entry.get("preprocessing", []),
+        )
 
     # ── LLM path ───────────────────────────────────────────────────────────────
 

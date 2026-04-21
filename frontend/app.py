@@ -30,6 +30,11 @@ APP_MODE = os.getenv("APP_MODE", "local")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8080")
 SUPPORTED_TYPES = [".ipynb", ".py", ".docx", ".json"]
 
+FAMILY_OPTIONS = [
+    "Ensemble", "Linear", "Deep Neural Network", "Boosting",
+    "Tree", "Bayesian", "Clustering", "Other",
+]
+
 # ── Service layer ──────────────────────────────────────────────────────────────
 
 @st.cache_resource
@@ -113,7 +118,9 @@ def parse_uploaded_file(uploaded, project_id):
                    params={"project_id": project_id} if project_id else {})
 
     # Phase 1: direct
+    from src.inference_engine import InferenceEngine
     mcp = get_mcp_direct()
+    db = get_db_direct()
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="wb") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
@@ -121,18 +128,72 @@ def parse_uploaded_file(uploaded, project_id):
         meta = mcp.parse_file(tmp_path)
         meta["file_path"] = uploaded.name
         entry_id = mcp.store_in_db(meta, project_id=project_id)
+        infer_result = InferenceEngine().infer(meta)
+        db.update_ledger_entry(entry_id, {
+            "auto_extracted": infer_result,
+            "confidence_score": infer_result["overall_confidence"],
+        })
         return {
             "status": "ok", "entry_id": entry_id,
             "file_type": ext.lstrip("."),
             "models_found": len(meta.get("models", [])),
             "metrics_found": len(meta.get("metrics", [])),
             "preprocessing_found": len(meta.get("preprocessing", [])),
+            "confidence": infer_result["overall_confidence"],
             "word_count": meta.get("word_count"),
             "doc_keywords": meta.get("doc_keywords"),
             "metadata": meta,
+            "experiment": infer_result,
         }
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def confirm_entry_action(entry_id: int, user_corrected: dict):
+    if APP_MODE == "cloud":
+        return api("POST", f"/confirm/{entry_id}", json={"user_corrected": user_corrected})
+    db = get_db_direct()
+    db.confirm_entry(entry_id, user_corrected)
+    return {"status": "confirmed", "entry_id": entry_id}
+
+
+def delete_ledger_entry_action(entry_id: int):
+    if APP_MODE == "cloud":
+        api("DELETE", f"/ledger/{entry_id}")
+    else:
+        get_db_direct().delete_ledger_entry(entry_id)
+
+
+def build_leaderboard(entries: list) -> list:
+    """Extract rows with numeric metric values for the leaderboard."""
+    rows = []
+    for e in entries:
+        uc = e.get("user_corrected") or {}
+        if isinstance(uc, str):
+            try:
+                import json as _json
+                uc = _json.loads(uc)
+            except Exception:
+                uc = {}
+        metrics = uc.get("metrics") or e.get("metrics") or []
+        models = uc.get("models") or e.get("models") or []
+        model_name = models[0]["name"] if models else "—"
+        model_family = models[0].get("family", "Other") if models else "Other"
+        author = uc.get("team_member") or e.get("team_member") or "—"
+        for m in metrics:
+            val = m.get("value")
+            if isinstance(val, (int, float)):
+                rows.append({
+                    "Entry": f"#{e['id']}",
+                    "File": e.get("file_path", "?"),
+                    "Model": model_name,
+                    "Family": model_family or "Other",
+                    "Metric": m["name"],
+                    "Value": round(val, 4),
+                    "Author": author,
+                    "Status": e.get("status", "Pending"),
+                })
+    return rows
 
 
 def load_ledger(project_id=None):
@@ -196,14 +257,13 @@ with st.sidebar:
         team_member = st.text_input("Your GitHub Username", key="gh_user")
 
     st.divider()
-    goal = st.text_area("🎯 Goal", value="Improve F1 score and add uncertainty quantification", height=70, key="goal_input")
-    execute_ar = st.toggle("⚡ Execute autoresearch", value=False, key="exec_ar")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_upload, tab_ledger, tab_plan, tab_costs, tab_snippet = st.tabs([
+tab_upload, tab_ledger, tab_tree, tab_plan, tab_costs, tab_snippet = st.tabs([
     "📂 Upload Files",
     "📜 Ledger",
+    "🌳 Experiment Tree",
     "🤖 Agent Plan",
     "💰 Costs",
     "📋 Notebook Snippet",
@@ -213,6 +273,16 @@ tab_upload, tab_ledger, tab_plan, tab_costs, tab_snippet = st.tabs([
 
 with tab_upload:
     st.header("Upload Files")
+
+    st.info(
+        "**Two ways to add experiments:**\n\n"
+        "**Option A — AI Parse:** Upload any `.ipynb`, `.py`, or `.docx` file and the AI will "
+        "automatically detect models, metrics, and preprocessing steps (best effort — confidence scored).\n\n"
+        "**Option B — Exact Metrics:** Add the logging cell from the **📋 Notebook Snippet** tab to "
+        "the end of your notebook, run it to save a `*_ledger_entry.json`, then upload that JSON here "
+        "for 100% accurate metric values and full feature importances.",
+        icon="💡",
+    )
 
     # Project picker for upload
     upload_proj_options = {p["name"]: p["id"] for p in projects}
@@ -228,6 +298,10 @@ with tab_upload:
         key="file_uploader",
     )
 
+    # Session state: list of dicts {entry_id, experiment, file_name}
+    if "pending_confirmations" not in st.session_state:
+        st.session_state["pending_confirmations"] = []
+
     if uploaded_files and st.button("📋 Parse All Files", type="primary"):
         for uploaded in uploaded_files:
             with st.spinner(f"Parsing {uploaded.name}..."):
@@ -236,7 +310,11 @@ with tab_upload:
             if result and result.get("status") == "ok":
                 ftype = result.get("file_type", "?")
                 icon = {"ipynb": "📓", "py": "🐍", "docx": "📄"}.get(ftype, "📁")
-                st.success(f"{icon} **{uploaded.name}** — entry #{result.get('entry_id')}")
+                conf = result.get("confidence", 0)
+                st.success(
+                    f"{icon} **{uploaded.name}** — entry #{result.get('entry_id')} "
+                    f"| confidence {conf:.0%}"
+                )
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Models", result["models_found"])
@@ -250,8 +328,130 @@ with tab_upload:
 
                 with st.expander("Full metadata"):
                     st.json(result.get("metadata", {}))
+
+                # Queue for confirmation
+                if result.get("experiment"):
+                    st.session_state["pending_confirmations"].append({
+                        "entry_id": result["entry_id"],
+                        "experiment": result["experiment"],
+                        "file_name": uploaded.name,
+                    })
             else:
                 st.error(f"Failed to parse {uploaded.name}")
+
+    # ── Confirmation UI ────────────────────────────────────────────────────────
+    if st.session_state.get("pending_confirmations"):
+        st.divider()
+        st.subheader("📋 Review Detected Experiments")
+        st.caption("Confirm or edit what the parser found. Confirmed entries are used by the agent pipeline.")
+
+        confirmed_indices = []
+
+        for idx, pending in enumerate(st.session_state["pending_confirmations"]):
+            exp = pending["experiment"]
+            entry_id = pending["entry_id"]
+            fname = pending["file_name"]
+            conf = exp.get("overall_confidence", 0)
+
+            with st.expander(
+                f"📊 {fname}  —  confidence {conf:.0%}  |  entry #{entry_id}",
+                expanded=True,
+            ):
+                # Models
+                st.markdown("**🤖 Models**")
+                edited_models = []
+                for mi, m in enumerate(exp.get("models", [])):
+                    mc1, mc2, mc3 = st.columns([3, 3, 1])
+                    name_val = mc1.text_input(
+                        "Name", value=m["name"],
+                        key=f"conf_mname_{entry_id}_{mi}",
+                    )
+                    family_val = mc2.selectbox(
+                        "Family",
+                        FAMILY_OPTIONS,
+                        index=FAMILY_OPTIONS.index(m["family"]) if m["family"] in FAMILY_OPTIONS else len(FAMILY_OPTIONS) - 1,
+                        key=f"conf_mfam_{entry_id}_{mi}",
+                    )
+                    mc3.caption(f"{m.get('confidence', 0):.0%}")
+                    edited_models.append({**m, "name": name_val, "family": family_val})
+
+                if not exp.get("models"):
+                    st.caption("No models detected.")
+
+                # Metrics — checkbox + value input per metric
+                st.markdown("**📊 Metrics**")
+                edited_metrics = []
+                for mi, m in enumerate(exp.get("metrics", [])):
+                    mc1, mc2, mc3 = st.columns([3, 2, 1])
+                    include = mc1.checkbox(
+                        m["name"], value=True, key=f"conf_met_inc_{entry_id}_{mi}"
+                    )
+                    existing_val = m.get("value")
+                    if isinstance(existing_val, (int, float)):
+                        val = mc2.number_input(
+                            "Value", value=float(existing_val),
+                            format="%.4f", key=f"conf_met_val_{entry_id}_{mi}",
+                            label_visibility="collapsed",
+                        )
+                    elif existing_val is None:
+                        val = mc2.number_input(
+                            "Value", value=0.0,
+                            format="%.4f", key=f"conf_met_val_{entry_id}_{mi}",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        val = existing_val  # complex value (e.g. classification_report dict)
+                        mc2.caption("(complex value)")
+                    mc3.caption(f"{m.get('confidence', 0):.0%}")
+                    if include:
+                        edited_metrics.append({**m, "value": val})
+                if not exp.get("metrics"):
+                    st.caption("No metrics detected.")
+
+                # Preprocessing
+                st.markdown("**⚙️ Preprocessing**")
+                all_prep_names = [p["name"] for p in exp.get("preprocessing", [])]
+                selected_prep = st.multiselect(
+                    "Preprocessing steps",
+                    options=all_prep_names,
+                    default=all_prep_names,
+                    key=f"conf_prep_{entry_id}",
+                )
+
+                # Task type
+                task_type_options = ["classification", "regression", "clustering", "unknown"]
+                current_task = exp.get("task_type", "unknown")
+                task_idx = task_type_options.index(current_task) if current_task in task_type_options else 3
+                edited_task = st.selectbox(
+                    "Task type",
+                    task_type_options,
+                    index=task_idx,
+                    key=f"conf_task_{entry_id}",
+                )
+
+                cb1, cb2 = st.columns(2)
+                if cb1.button("✅ Confirm & Save", key=f"confirm_btn_{entry_id}", type="primary"):
+                    user_corrected = {
+                        "models": edited_models,
+                        "metrics": edited_metrics,
+                        "preprocessing": [
+                            p for p in exp.get("preprocessing", []) if p["name"] in selected_prep
+                        ],
+                        "hyperparameters": exp.get("hyperparameters", {}),
+                        "task_type": edited_task,
+                        "overall_confidence": conf,
+                    }
+                    confirm_entry_action(entry_id, user_corrected)
+                    st.success(f"Entry #{entry_id} confirmed!")
+                    confirmed_indices.append(idx)
+
+                if cb2.button("⏭ Skip", key=f"skip_btn_{entry_id}"):
+                    st.info("Skipped — entry saved as unconfirmed.")
+                    confirmed_indices.append(idx)
+
+        # Remove handled confirmations (reverse order to preserve indices)
+        for idx in sorted(confirmed_indices, reverse=True):
+            st.session_state["pending_confirmations"].pop(idx)
 
 # ── Tab 2: Ledger ──────────────────────────────────────────────────────────────
 
@@ -268,6 +468,40 @@ with tab_ledger:
         st.info("No files in this project yet. Upload files in the Upload tab.")
     else:
         st.caption(f"{len(entries)} file(s)")
+
+        # ── Leaderboard ────────────────────────────────────────────────────────
+        lb_rows = build_leaderboard(entries)
+        if lb_rows:
+            with st.expander("🏆 Leaderboard", expanded=True):
+                import pandas as pd
+                lb_df = pd.DataFrame(lb_rows)
+                metric_names = sorted(lb_df["Metric"].unique())
+                lc1, lc2, lc3 = st.columns([2, 1, 1])
+                rank_metric = lc1.selectbox("Rank by metric", metric_names, key="lb_metric")
+                higher_better = lc2.checkbox("Higher is better", value=True, key="lb_higher")
+                group_by_family = lc3.checkbox("Best by family", value=False, key="lb_family")
+
+                filtered = lb_df[lb_df["Metric"] == rank_metric].copy()
+                filtered = filtered.sort_values("Value", ascending=not higher_better).reset_index(drop=True)
+
+                if group_by_family:
+                    # Keep the best row per model family
+                    idx = (
+                        filtered.groupby("Family")["Value"]
+                        .agg("idxmax" if higher_better else "idxmin")
+                    )
+                    filtered = filtered.loc[idx.values].sort_values(
+                        "Value", ascending=not higher_better
+                    ).reset_index(drop=True)
+
+                filtered.insert(0, "Rank", range(1, len(filtered) + 1))
+                display_cols = ["Rank", "File", "Model", "Family", "Value", "Author", "Status", "Entry"]
+                st.dataframe(
+                    filtered[display_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            st.divider()
 
         for entry in entries:
             ftype = entry.get("file_type", "ipynb")
@@ -290,6 +524,10 @@ with tab_ledger:
                     st.write(f"**Project:** {proj_name}")
                     st.write(f"**Status:** {entry.get('status', '—')}")
                     st.write(f"**Logged:** {entry.get('timestamp', '—')[:19]}")
+                    if st.button("🗑️ Delete entry", key=f"del_entry_{entry.get('id')}"):
+                        delete_ledger_entry_action(entry["id"])
+                        st.success("Entry deleted.")
+                        st.rerun()
 
                 with col_content:
                     if models:
@@ -302,7 +540,9 @@ with tab_ledger:
                     if metrics:
                         st.subheader("📊 Metrics")
                         for met in metrics:
-                            st.write(f"- `{met.get('function', met.get('name', '?'))}`"
+                            val = met.get("value")
+                            val_str = f" = **{val:.4f}**" if isinstance(val, (int, float)) else ""
+                            st.write(f"- `{met.get('name', met.get('function', '?'))}`{val_str}"
                                      + (f" — line {met['line_number']}" if met.get("line_number") else ""))
 
                     if preprocessing:
@@ -315,10 +555,154 @@ with tab_ledger:
                         st.subheader("📄 Document Preview")
                         st.text(entry["raw_text"][:800] + ("..." if len(entry.get("raw_text","")) > 800 else ""))
 
-# ── Tab 3: Agent Plan ──────────────────────────────────────────────────────────
+# ── Tab 3: Experiment Tree ────────────────────────────────────────────────────
+
+_AUTHOR_COLORS = [
+    "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A",
+    "#19D3F3", "#FF6692", "#B6E880", "#FF97FF", "#FECB52",
+]
+
+
+with tab_tree:
+    import plotly.graph_objects as go
+    from datetime import datetime as _dt
+
+    st.header("🌳 Experiment Tree")
+    st.caption("Each node is a confirmed experiment. Color = author. Y-axis = selected metric value.")
+
+    tree_entries = load_ledger(project_id=selected_project_id)
+
+    if not tree_entries:
+        st.info("No entries yet. Upload and confirm experiments first.")
+    else:
+        # Collect all numeric metric names across entries
+        tree_lb_rows = build_leaderboard(tree_entries)
+        all_tree_metrics = sorted({r["Metric"] for r in tree_lb_rows}) if tree_lb_rows else []
+
+        if not all_tree_metrics:
+            st.info("No confirmed entries with numeric metric values yet. Confirm entries in the Upload tab first.")
+        else:
+            tree_metric = st.selectbox("Metric for Y-axis", all_tree_metrics, key="tree_metric")
+
+            # Build node data
+            node_data = []
+            for e in sorted(tree_entries, key=lambda x: x.get("timestamp", "")):
+                uc = e.get("user_corrected") or {}
+                if isinstance(uc, str):
+                    try:
+                        import json as _json2
+                        uc = _json2.loads(uc)
+                    except Exception:
+                        uc = {}
+                metrics_list = uc.get("metrics") or e.get("metrics") or []
+                models_list = uc.get("models") or e.get("models") or []
+                model_name = models_list[0]["name"] if models_list else "—"
+                author = uc.get("team_member") or e.get("team_member") or "Unknown"
+
+                # Find value for selected metric
+                metric_val = None
+                for m in metrics_list:
+                    if m.get("name") == tree_metric and isinstance(m.get("value"), (int, float)):
+                        metric_val = m["value"]
+                        break
+
+                try:
+                    ts = _dt.fromisoformat(e.get("timestamp", "").replace("Z", ""))
+                except Exception:
+                    ts = _dt(2000, 1, 1)
+
+                node_data.append({
+                    "id": e["id"],
+                    "file": e.get("file_path", "?"),
+                    "model": model_name,
+                    "author": author,
+                    "ts": ts,
+                    "value": metric_val,
+                    "status": e.get("status", "Pending"),
+                    "confidence": e.get("confidence_score") or 0,
+                    "project_id": e.get("project_id"),
+                })
+
+            # Author → color map
+            unique_authors = sorted({n["author"] for n in node_data})
+            color_map = {a: _AUTHOR_COLORS[i % len(_AUTHOR_COLORS)] for i, a in enumerate(unique_authors)}
+
+            fig = go.Figure()
+
+            # Draw edges (project-grouped, ordered by timestamp)
+            from itertools import groupby
+            project_groups = {}
+            for nd in node_data:
+                pid = nd["project_id"] or 0
+                project_groups.setdefault(pid, []).append(nd)
+
+            for pid, group in project_groups.items():
+                group_sorted = sorted(group, key=lambda x: x["ts"])
+                for i in range(len(group_sorted) - 1):
+                    a, b = group_sorted[i], group_sorted[i + 1]
+                    ya = a["value"] if a["value"] is not None else 0
+                    yb = b["value"] if b["value"] is not None else 0
+                    fig.add_trace(go.Scatter(
+                        x=[a["ts"], b["ts"]], y=[ya, yb],
+                        mode="lines",
+                        line=dict(color="#444", width=1, dash="dot"),
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ))
+
+            # Draw nodes per author (for legend grouping)
+            for author in unique_authors:
+                author_nodes = [n for n in node_data if n["author"] == author]
+                xs = [n["ts"] for n in author_nodes]
+                ys = [n["value"] if n["value"] is not None else 0 for n in author_nodes]
+                texts = []
+                for n in author_nodes:
+                    _vstr = f"{n['value']:.4f}" if n["value"] is not None else "—"
+                    texts.append(
+                        f"#{n['id']} {n['model']}<br>{tree_metric}: {_vstr}<br>"
+                        f"Author: {n['author']}<br>Status: {n['status']}<br>"
+                        f"Confidence: {n['confidence']:.0%}"
+                    )
+                symbols = [
+                    "circle" if n["value"] is not None else "circle-open"
+                    for n in author_nodes
+                ]
+                fig.add_trace(go.Scatter(
+                    x=xs, y=ys,
+                    mode="markers+text",
+                    marker=dict(size=16, color=color_map[author], symbol=symbols),
+                    text=[f"#{n['id']}" for n in author_nodes],
+                    textposition="top center",
+                    hovertext=texts,
+                    hoverinfo="text",
+                    name=author,
+                ))
+
+            fig.update_layout(
+                xaxis_title="Time",
+                yaxis_title=tree_metric,
+                legend_title="Author",
+                height=480,
+                margin=dict(l=40, r=20, t=30, b=40),
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Open circles = no confirmed value for this metric. Connect lines = same project, ordered by time.")
+
+
+# ── Tab 4: Agent Plan ──────────────────────────────────────────────────────────
 
 with tab_plan:
     st.header("🤖 Multi-Agent Planning")
+
+    goal = st.text_area(
+        "🎯 Goal",
+        value=st.session_state.get("goal_input", "Improve accuracy on the test set"),
+        height=70,
+        key="goal_input",
+        help="Describe what you want to optimize. E.g. 'Maximize accuracy for multiclass classification'",
+    )
+    execute_ar = st.toggle("⚡ Execute autoresearch", value=False, key="exec_ar")
 
     all_entries = load_ledger(project_id=selected_project_id)
     file_options = [e.get("file_path", "?") for e in all_entries]
@@ -327,7 +711,6 @@ with tab_plan:
         st.warning("No files in ledger. Upload files first.")
     else:
         selected_file = st.selectbox("Select file for planning", file_options, key="plan_file_select")
-        st.info(f"Goal: **{goal}** | autoresearch: **{'ON' if execute_ar else 'OFF'}**")
 
         if st.button("🚀 Generate Plan", type="primary", key="btn_generate_plan"):
             with st.spinner("Running multi-agent pipeline..."):

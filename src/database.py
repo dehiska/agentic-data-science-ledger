@@ -59,10 +59,17 @@ class LocalDatabase:
         """Add columns that were introduced after initial schema creation."""
         existing = {row[1] for row in self.conn.execute("PRAGMA table_info(ledger)")}
         migrations = [
-            ("project_id", "INTEGER REFERENCES projects(id) ON DELETE SET NULL"),
-            ("file_type",  "TEXT DEFAULT 'ipynb'"),
-            ("raw_text",   "TEXT DEFAULT ''"),
-            ("status",     "TEXT DEFAULT 'Pending'"),
+            ("project_id",      "INTEGER REFERENCES projects(id) ON DELETE SET NULL"),
+            ("file_type",       "TEXT DEFAULT 'ipynb'"),
+            ("raw_text",        "TEXT DEFAULT ''"),
+            ("status",          "TEXT DEFAULT 'Pending'"),
+            # v2: inference + confirmation
+            ("auto_extracted",  "TEXT DEFAULT NULL"),
+            ("user_corrected",  "TEXT DEFAULT NULL"),
+            ("confidence_score","REAL DEFAULT NULL"),
+            ("approved",        "INTEGER DEFAULT 0"),
+            # v2.1: deduplication
+            ("experiment_hash", "TEXT DEFAULT NULL"),
         ]
         for col, definition in migrations:
             if col not in existing:
@@ -105,13 +112,22 @@ class LocalDatabase:
 
     # ── Ledger ─────────────────────────────────────────────────────────────────
 
-    def insert_ledger_entry(self, metadata: Dict, project_id: Optional[int] = None, **kwargs) -> int:
+    def insert_ledger_entry(
+        self,
+        metadata: Dict,
+        project_id: Optional[int] = None,
+        auto_extracted: Optional[Dict] = None,
+        confidence_score: Optional[float] = None,
+        experiment_hash: Optional[str] = None,
+        **kwargs,
+    ) -> int:
         cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT INTO ledger
-              (project_id, file_path, file_type, environment, models, metrics, preprocessing, raw_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (project_id, file_path, file_type, environment, models, metrics,
+               preprocessing, raw_text, auto_extracted, confidence_score, experiment_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -122,10 +138,25 @@ class LocalDatabase:
                 json.dumps(metadata.get("metrics", [])),
                 json.dumps(metadata.get("preprocessing", [])),
                 metadata.get("raw_text", ""),
+                json.dumps(auto_extracted) if auto_extracted is not None else None,
+                confidence_score,
+                experiment_hash,
             ),
         )
         self.conn.commit()
         return cursor.lastrowid
+
+    def find_by_hash(self, experiment_hash: str) -> Optional[Dict]:
+        """Return the first entry with a matching experiment_hash, or None."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, file_path, timestamp FROM ledger WHERE experiment_hash = ? LIMIT 1",
+            (experiment_hash,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return {"id": row[0], "file_path": row[1], "timestamp": row[2]}
+        return None
 
     def get_ledger_entries(
         self,
@@ -170,6 +201,56 @@ class LocalDatabase:
             f"UPDATE ledger SET {', '.join(set_parts)} WHERE id = ?", values
         )
         self.conn.commit()
+
+    def delete_ledger_entry(self, entry_id: int) -> None:
+        self.conn.execute("DELETE FROM ledger WHERE id = ?", (entry_id,))
+        self.conn.commit()
+
+    def confirm_entry(self, entry_id: int, user_corrected: Dict) -> None:
+        """Store user-edited experiment and mark entry as approved."""
+        self.conn.execute(
+            "UPDATE ledger SET user_corrected=?, approved=1, status='Confirmed' WHERE id=?",
+            (json.dumps(user_corrected), entry_id),
+        )
+        self.conn.commit()
+
+    def get_experiments(
+        self,
+        project_id: Optional[int] = None,
+        approved_only: bool = True,
+    ) -> List[Dict]:
+        """Return ledger entries with auto_extracted/user_corrected parsed."""
+        cursor = self.conn.cursor()
+        where, params = [], []
+        if approved_only:
+            where.append("l.approved = 1")
+        if project_id is not None:
+            where.append("l.project_id = ?")
+            params.append(project_id)
+        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        cursor.execute(f"""
+            SELECT l.*, p.name as project_name
+            FROM ledger l
+            LEFT JOIN projects p ON p.id = l.project_id
+            {clause}
+            ORDER BY l.timestamp DESC
+        """, params)
+        columns = [col[0] for col in cursor.description]
+        rows = []
+        for row in cursor.fetchall():
+            entry = dict(zip(columns, row))
+            for field in ("environment", "models", "metrics", "preprocessing"):
+                try:
+                    entry[field] = json.loads(entry[field] or "[]")
+                except Exception:
+                    entry[field] = []
+            for field in ("auto_extracted", "user_corrected"):
+                try:
+                    entry[field] = json.loads(entry[field]) if entry[field] else None
+                except Exception:
+                    entry[field] = None
+            rows.append(entry)
+        return rows
 
     # ── Costs ──────────────────────────────────────────────────────────────────
 
@@ -229,6 +310,10 @@ class CloudDatabase:
         github_branch: str = "main",
         github_commit: str = "",
         team_member: Optional[str] = None,
+        auto_extracted: Optional[Dict] = None,
+        confidence_score: Optional[float] = None,
+        experiment_hash: Optional[str] = None,
+        **kwargs,
     ) -> int:
         data = {
             "project_id": project_id,
@@ -243,8 +328,22 @@ class CloudDatabase:
             "preprocessing": metadata.get("preprocessing", []),
             "raw_text": metadata.get("raw_text", ""),
             "team_member": team_member,
+            "auto_extracted": auto_extracted,
+            "confidence_score": confidence_score,
+            "experiment_hash": experiment_hash,
         }
         return self.db.table("ledger").insert(data).execute().data[0]["id"]
+
+    def find_by_hash(self, experiment_hash: str) -> Optional[Dict]:
+        """Return the first entry with a matching experiment_hash, or None."""
+        r = (
+            self.db.table("ledger")
+            .select("id, file_path, timestamp")
+            .eq("experiment_hash", experiment_hash)
+            .limit(1)
+            .execute()
+        )
+        return r.data[0] if r.data else None
 
     def get_ledger_entries(
         self,
@@ -252,17 +351,49 @@ class CloudDatabase:
         project_id: Optional[int] = None,
         github_repo: Optional[str] = None,
     ) -> List[Dict]:
-        q = self.db.table("ledger").select("*").order("timestamp", desc=True)
+        q = self.db.table("ledger").select("*, projects(name)").order("timestamp", desc=True)
         if file_path:
             q = q.eq("file_path", file_path)
         if project_id is not None:
             q = q.eq("project_id", project_id)
         if github_repo:
             q = q.eq("github_repo", github_repo)
-        return q.execute().data
+        rows = q.execute().data
+        # Flatten joined project name to match LocalDatabase shape
+        for row in rows:
+            proj = row.pop("projects", None) or {}
+            row["project_name"] = proj.get("name", "—") if isinstance(proj, dict) else "—"
+        return rows
 
     def update_ledger_entry(self, entry_id: int, updates: Dict):
         self.db.table("ledger").update(updates).eq("id", entry_id).execute()
+
+    def delete_ledger_entry(self, entry_id: int) -> None:
+        self.db.table("ledger").delete().eq("id", entry_id).execute()
+
+    def confirm_entry(self, entry_id: int, user_corrected: Dict) -> None:
+        """Store user-edited experiment and mark entry as approved."""
+        self.db.table("ledger").update({
+            "user_corrected": user_corrected,
+            "approved": 1,
+            "status": "Confirmed",
+        }).eq("id", entry_id).execute()
+
+    def get_experiments(
+        self,
+        project_id: Optional[int] = None,
+        approved_only: bool = True,
+    ) -> List[Dict]:
+        q = self.db.table("ledger").select("*, projects(name)").order("timestamp", desc=True)
+        if approved_only:
+            q = q.eq("approved", 1)
+        if project_id is not None:
+            q = q.eq("project_id", project_id)
+        rows = q.execute().data
+        for row in rows:
+            proj = row.pop("projects", None) or {}
+            row["project_name"] = proj.get("name", "—") if isinstance(proj, dict) else "—"
+        return rows
 
     def log_cost(self, plan_id: int, gcp_instance: str, time_hours: float, cost: float):
         self.db.table("costs").insert(

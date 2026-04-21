@@ -29,7 +29,14 @@ CREATE TABLE IF NOT EXISTS ledger (
     timestamp       TIMESTAMPTZ DEFAULT NOW(),
     team_member     TEXT,
     status          TEXT DEFAULT 'Pending',
-    supabase_id     UUID DEFAULT gen_random_uuid()
+    supabase_id     UUID DEFAULT gen_random_uuid(),
+    -- v2: inference + confirmation
+    auto_extracted  JSONB DEFAULT NULL,
+    user_corrected  JSONB DEFAULT NULL,
+    confidence_score REAL DEFAULT NULL,
+    approved        INTEGER DEFAULT 0,
+    -- v2.1: deduplication
+    experiment_hash TEXT DEFAULT NULL
 );
 
 -- Indexes for common query patterns
@@ -37,8 +44,10 @@ CREATE INDEX IF NOT EXISTS idx_ledger_project_id   ON ledger(project_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_file_path    ON ledger(file_path);
 CREATE INDEX IF NOT EXISTS idx_ledger_file_type    ON ledger(file_type);
 CREATE INDEX IF NOT EXISTS idx_ledger_github_repo  ON ledger(github_repo);
-CREATE INDEX IF NOT EXISTS idx_ledger_team_member  ON ledger(team_member);
-CREATE INDEX IF NOT EXISTS idx_ledger_timestamp    ON ledger(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_ledger_team_member      ON ledger(team_member);
+CREATE INDEX IF NOT EXISTS idx_ledger_timestamp        ON ledger(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_ledger_experiment_hash  ON ledger(experiment_hash);
+CREATE INDEX IF NOT EXISTS idx_ledger_approved         ON ledger(approved);
 
 -- ── Team members table ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS team_members (

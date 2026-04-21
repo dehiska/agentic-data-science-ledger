@@ -35,7 +35,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.database import get_db
-from src.mcp_server import MCPServer
+from src.inference_engine import InferenceEngine
+from src.mcp_server import MCPServer, generate_experiment_hash
 from src.multi_agent_orchestrator import MultiAgentOrchestrator
 from src.rag_system import RAGSystem
 
@@ -54,7 +55,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPPORTED_TYPES = {".ipynb", ".py", ".docx", ".doc"}
+SUPPORTED_TYPES = {".ipynb", ".py", ".docx", ".doc", ".json"}
 
 # ── Singletons ─────────────────────────────────────────────────────────────────
 
@@ -116,6 +117,14 @@ class AutoresearchRequest(BaseModel):
     repo_name: Optional[str] = None
     branch: str = "main"
     team_member: Optional[str] = None
+
+
+class InferRequest(BaseModel):
+    metadata: dict
+
+
+class ConfirmRequest(BaseModel):
+    user_corrected: dict
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -187,7 +196,16 @@ async def parse_file_upload(
     try:
         metadata = mcp.parse_file(tmp_path)
         metadata["file_path"] = file.filename
+        # Check for duplicate experiment before inserting
+        exp_hash = generate_experiment_hash(metadata)
+        duplicate = db.find_by_hash(exp_hash) if exp_hash else None
         entry_id = mcp.store_in_db(metadata, project_id=project_id)
+        # Run inference layer and attach to entry
+        infer_result = InferenceEngine().infer(metadata)
+        db.update_ledger_entry(entry_id, {
+            "auto_extracted": infer_result,
+            "confidence_score": infer_result["overall_confidence"],
+        })
         return {
             "status": "ok",
             "file": file.filename,
@@ -197,9 +215,13 @@ async def parse_file_upload(
             "models_found": len(metadata.get("models", [])),
             "metrics_found": len(metadata.get("metrics", [])),
             "preprocessing_found": len(metadata.get("preprocessing", [])),
+            "confidence": infer_result["overall_confidence"],
+            "experiment_hash": exp_hash,
+            "duplicate_of": duplicate,
             "word_count": metadata.get("word_count"),
             "doc_keywords": metadata.get("doc_keywords"),
             "metadata": metadata,
+            "experiment": infer_result,
         }
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -212,7 +234,19 @@ def parse_file_local(req: ParseLocalRequest):
         raise HTTPException(404, f"File not found: {req.file_path}")
     metadata = mcp.parse_file(req.file_path, req.repo_name, req.branch, req.team_member)
     entry_id = mcp.store_in_db(metadata, project_id=req.project_id)
-    return {"status": "ok", "entry_id": entry_id, "models_found": len(metadata.get("models", [])), "metadata": metadata}
+    infer_result = InferenceEngine().infer(metadata)
+    db.update_ledger_entry(entry_id, {
+        "auto_extracted": infer_result,
+        "confidence_score": infer_result["overall_confidence"],
+    })
+    return {
+        "status": "ok",
+        "entry_id": entry_id,
+        "models_found": len(metadata.get("models", [])),
+        "confidence": infer_result["overall_confidence"],
+        "metadata": metadata,
+        "experiment": infer_result,
+    }
 
 
 # Keep old endpoint working
@@ -223,6 +257,37 @@ async def parse_notebook_upload(file: UploadFile = File(...), team_member: Optio
 @app.post("/notebooks/parse-local")
 def parse_notebook_local(req: ParseLocalRequest):
     return parse_file_local(req)
+
+
+# ── Inference & Confirmation ───────────────────────────────────────────────────
+
+@app.post("/infer")
+def infer_experiment(req: InferRequest):
+    """Stateless: run inference engine on parse metadata, return structured experiment."""
+    result = InferenceEngine().infer(req.metadata)
+    return {"status": "ok", "experiment": result}
+
+
+@app.post("/confirm/{entry_id}")
+def confirm_entry(entry_id: int, req: ConfirmRequest):
+    """Store user-corrected experiment and mark entry as approved."""
+    db, _, _, _ = get_services()
+    for e in db.get_ledger_entries():
+        if e.get("id") == entry_id:
+            db.confirm_entry(entry_id, req.user_corrected)
+            return {"status": "confirmed", "entry_id": entry_id}
+    raise HTTPException(404, f"Entry {entry_id} not found.")
+
+
+@app.get("/experiments")
+def get_experiments(
+    project_id: Optional[int] = None,
+    approved_only: bool = True,
+):
+    """Return ledger entries with confirmed experiment data."""
+    db, _, _, _ = get_services()
+    exps = db.get_experiments(project_id=project_id, approved_only=approved_only)
+    return {"experiments": exps, "count": len(exps)}
 
 
 # ── Ledger ─────────────────────────────────────────────────────────────────────
@@ -248,6 +313,13 @@ def get_ledger_entry(entry_id: int):
         if e.get("id") == entry_id:
             return e
     raise HTTPException(404, f"Entry {entry_id} not found.")
+
+
+@app.delete("/ledger/{entry_id}")
+def delete_ledger_entry(entry_id: int):
+    db, _, _, _ = get_services()
+    db.delete_ledger_entry(entry_id)
+    return {"status": "deleted", "entry_id": entry_id}
 
 
 # ── Planning ───────────────────────────────────────────────────────────────────

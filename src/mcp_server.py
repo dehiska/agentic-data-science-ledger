@@ -14,6 +14,8 @@ Usage:
 """
 
 import ast
+import hashlib
+import json as _json_mod
 import subprocess
 import sys
 from pathlib import Path
@@ -179,7 +181,31 @@ class MCPServer:
     def store_in_db(self, metadata: Dict, project_id: Optional[int] = None, **kwargs) -> Optional[int]:
         if self.db is None:
             return None
-        return self.db.insert_ledger_entry(metadata, project_id=project_id, **kwargs)
+        exp_hash = generate_experiment_hash(metadata)
+        return self.db.insert_ledger_entry(
+            metadata, project_id=project_id, experiment_hash=exp_hash, **kwargs
+        )
+
+
+def generate_experiment_hash(metadata: Dict) -> str:
+    """
+    Stable MD5 hash of (model names + params + preprocessing names).
+    Identical experiments produce the same hash regardless of run order.
+    """
+    key = _json_mod.dumps(
+        {
+            "models": sorted(
+                [{"name": m.get("name", ""), "params": m.get("params") or {}}
+                 for m in metadata.get("models", [])],
+                key=lambda x: x["name"],
+            ),
+            "preprocessing": sorted(
+                [p.get("name", "") for p in metadata.get("preprocessing", [])],
+            ),
+        },
+        sort_keys=True,
+    )
+    return hashlib.md5(key.encode()).hexdigest()
 
     # ── .ipynb parser ──────────────────────────────────────────────────────────
 

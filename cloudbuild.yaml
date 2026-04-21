@@ -1,0 +1,108 @@
+# Cloud Build pipeline — builds both images, pushes to Artifact Registry,
+# deploys backend first (to get its URL), then deploys frontend with that URL.
+#
+# Substitution variables set in Cloud Build trigger or gcloud CLI:
+#   _REGION           e.g. us-central1
+#   _REPO             e.g. agentic-ledger           (Artifact Registry repo name)
+#   _SUPABASE_URL     your Supabase project URL
+#   _SUPABASE_KEY     your Supabase anon key
+#   _OPENAI_API_KEY   optional, for agent plan feature
+#   _APP_MODE         cloud
+
+substitutions:
+  _REGION: us-central1
+  _REPO: agentic-ledger
+  _APP_MODE: cloud
+
+steps:
+  # ── 1. Build backend image ───────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build-backend
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:latest
+      - -f
+      - Dockerfile.backend
+      - .
+
+  # ── 2. Build frontend image ──────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build-frontend
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:latest
+      - -f
+      - Dockerfile.frontend
+      - .
+
+  # ── 3. Push backend image ────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push-backend
+    waitFor: [build-backend]
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend
+
+  # ── 4. Push frontend image ───────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push-frontend
+    waitFor: [build-frontend]
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend
+
+  # ── 5. Deploy backend to Cloud Run ──────────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-backend
+    waitFor: [push-backend]
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - agentic-ledger-backend
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$COMMIT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=1Gi
+      - --cpu=1
+      - --min-instances=0
+      - --max-instances=3
+      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_OPENAI_API_KEY}
+
+  # ── 6. Get backend URL and deploy frontend ───────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-frontend
+    waitFor: [push-frontend, deploy-backend]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        BACKEND_URL=$(gcloud run services describe agentic-ledger-backend \
+          --region=${_REGION} --format='value(status.url)')
+        echo "Backend URL: $BACKEND_URL"
+        gcloud run deploy agentic-ledger-frontend \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$COMMIT_SHA \
+          --region=${_REGION} \
+          --platform=managed \
+          --allow-unauthenticated \
+          --memory=1Gi \
+          --cpu=1 \
+          --min-instances=0 \
+          --max-instances=3 \
+          --set-env-vars="APP_MODE=${_APP_MODE},BACKEND_URL=$${BACKEND_URL},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY}"
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
