@@ -77,7 +77,7 @@ def get_services():
     if _orchestrator is None:
         _orchestrator = MultiAgentOrchestrator(
             db=_db, rag=_rag,
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
             github_token=os.getenv("GITHUB_TOKEN"),
         )
     if _mcp is None:

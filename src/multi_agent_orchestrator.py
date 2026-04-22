@@ -34,7 +34,8 @@ class MultiAgentOrchestrator:
         self,
         db=None,
         rag: Optional[RAGSystem] = None,
-        openai_api_key: Optional[str] = None,
+        anthropic_api_key: Optional[str] = None,
+        openai_api_key: Optional[str] = None,  # kept for backward compat, ignored
         github_token: Optional[str] = None,
     ):
         self.db = db
@@ -44,7 +45,7 @@ class MultiAgentOrchestrator:
         self._rag_initialized = rag is not None
 
         # LLM setup
-        self.llm = self._init_llm(openai_api_key)
+        self.llm = self._init_llm(anthropic_api_key)
 
         # Agents
         self.lead_scientist = LeadScientistAgent(self._get_rag(), self.llm, db)
@@ -131,12 +132,12 @@ class MultiAgentOrchestrator:
         return {"file_path": file_path, "models": [], "metrics": [], "preprocessing": []}
 
     def _init_llm(self, api_key: Optional[str]):
-        key = api_key or os.getenv("OPENAI_API_KEY")
+        key = api_key or os.getenv("ANTHROPIC_API_KEY")
         if not key:
             return None
         try:
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(model="gpt-4o-mini", openai_api_key=key, temperature=0.2)
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(model="claude-3-5-haiku-20241022", anthropic_api_key=key, temperature=0.2)
         except Exception:
             return None
 

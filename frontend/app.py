@@ -48,7 +48,7 @@ def get_local_services():
     mcp = MCPServer(db=db)
     orchestrator = MultiAgentOrchestrator(
         db=db,
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
         github_token=os.getenv("GITHUB_TOKEN"),
     )
     return db, mcp, orchestrator
