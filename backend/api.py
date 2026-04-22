@@ -142,9 +142,10 @@ def create_project(req: CreateProjectRequest):
     try:
         project_id = db.create_project(req.name, req.description)
     except Exception as e:
-        if "UNIQUE" in str(e):
+        err = str(e)
+        if any(k in err for k in ("UNIQUE", "unique", "duplicate key", "23505", "already exists")):
             raise HTTPException(409, f"Project '{req.name}' already exists.")
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, err)
     return {"id": project_id, "name": req.name, "description": req.description}
 
 
@@ -180,6 +181,8 @@ async def parse_file_upload(
     file: UploadFile = File(...),
     project_id: Optional[int] = Query(None),
     team_member: Optional[str] = Query(None),
+    github_repo: Optional[str] = Query(None),
+    github_branch: Optional[str] = Query("main"),
 ):
     """Upload .ipynb / .py / .docx → parse → store in ledger under a project."""
     db, _, _, mcp = get_services()
@@ -199,7 +202,12 @@ async def parse_file_upload(
         # Check for duplicate experiment before inserting
         exp_hash = generate_experiment_hash(metadata)
         duplicate = db.find_by_hash(exp_hash) if exp_hash else None
-        entry_id = mcp.store_in_db(metadata, project_id=project_id)
+        entry_id = mcp.store_in_db(
+            metadata, project_id=project_id,
+            github_repo=github_repo or "",
+            github_branch=github_branch or "main",
+            team_member=team_member,
+        )
         # Run inference layer and attach to entry
         infer_result = InferenceEngine().infer(metadata)
         db.update_ledger_entry(entry_id, {

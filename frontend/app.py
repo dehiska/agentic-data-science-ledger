@@ -54,14 +54,22 @@ def get_local_services():
     return db, mcp, orchestrator
 
 
-def api(method: str, path: str, **kwargs):
+def api(method: str, path: str, silent: bool = False, **kwargs):
     import httpx
     try:
         r = httpx.request(method, f"{BACKEND_URL}{path}", timeout=60.0, **kwargs)
+        if r.status_code == 409:
+            # Duplicate — return structured error, don't toast
+            return {"_error": 409, "detail": r.json().get("detail", "Already exists.")}
         r.raise_for_status()
         return r.json()
+    except httpx.HTTPStatusError as e:
+        if not silent:
+            st.error(f"API error: {e}")
+        return None
     except Exception as e:
-        st.error(f"API error: {e}")
+        if not silent:
+            st.error(f"API error: {e}")
         return None
 
 
@@ -91,14 +99,14 @@ def load_projects():
 
 def create_project_action(name: str, description: str):
     if APP_MODE == "cloud":
-        return api("POST", "/projects", json={"name": name, "description": description})
+        return api("POST", "/projects", silent=True, json={"name": name, "description": description})
     import sqlite3
     db = get_db_direct()
     try:
         pid = db.create_project(name, description)
         return {"id": pid, "name": name}
     except sqlite3.IntegrityError:
-        return None  # duplicate name — caller shows warning
+        return {"_error": 409, "detail": f"Project '{name}' already exists."}
 
 
 def delete_project_action(project_id: int):
@@ -113,9 +121,20 @@ def parse_uploaded_file(uploaded, project_id):
     content = uploaded.getvalue()
 
     if APP_MODE == "cloud":
+        params = {}
+        if project_id:
+            params["project_id"] = project_id
+        gh_repo = st.session_state.get("gh_repo", "").strip()
+        gh_branch = st.session_state.get("gh_branch", "main").strip()
+        gh_user = st.session_state.get("gh_user", "").strip()
+        if gh_repo:
+            params["github_repo"] = gh_repo
+            params["github_branch"] = gh_branch or "main"
+        if gh_user:
+            params["team_member"] = gh_user
         return api("POST", "/files/parse",
                    files={"file": (uploaded.name, content, "application/octet-stream")},
-                   params={"project_id": project_id} if project_id else {})
+                   params=params)
 
     # Phase 1: direct
     from src.inference_engine import InferenceEngine
@@ -225,11 +244,13 @@ with st.sidebar:
                 st.warning("Enter a project name.")
             else:
                 result = create_project_action(new_name.strip(), new_desc.strip())
-                if result:
+                if result and result.get("_error") == 409:
+                    st.warning(f'A project named "**{new_name}**" already exists. Choose a different name.')
+                elif result:
                     st.success(f"Created: **{new_name}**")
                     st.rerun()
                 else:
-                    st.warning(f'A project named "{new_name}" already exists.')
+                    st.error("Failed to create project. Please try again.")
 
     st.divider()
 
@@ -250,9 +271,10 @@ with st.sidebar:
 
     st.divider()
 
-    # GitHub / Phase 2 settings
-    with st.expander("GitHub (Phase 2)", expanded=False):
-        repo_name = st.text_input("GitHub Repo", placeholder="user/repo", key="gh_repo")
+    # GitHub settings
+    with st.expander("🔗 Connect to GitHub", expanded=False):
+        st.caption("Optional — used to tag experiments with repo info and your username.")
+        repo_name = st.text_input("GitHub Repo", placeholder="username/repo-name", key="gh_repo")
         branch = st.text_input("Branch", value="main", key="gh_branch")
         team_member = st.text_input("Your GitHub Username", key="gh_user")
 
