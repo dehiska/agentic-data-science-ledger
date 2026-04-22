@@ -186,27 +186,6 @@ class MCPServer:
             metadata, project_id=project_id, experiment_hash=exp_hash, **kwargs
         )
 
-
-def generate_experiment_hash(metadata: Dict) -> str:
-    """
-    Stable MD5 hash of (model names + params + preprocessing names).
-    Identical experiments produce the same hash regardless of run order.
-    """
-    key = _json_mod.dumps(
-        {
-            "models": sorted(
-                [{"name": m.get("name", ""), "params": m.get("params") or {}}
-                 for m in metadata.get("models", [])],
-                key=lambda x: x["name"],
-            ),
-            "preprocessing": sorted(
-                [p.get("name", "") for p in metadata.get("preprocessing", [])],
-            ),
-        },
-        sort_keys=True,
-    )
-    return hashlib.md5(key.encode()).hexdigest()
-
     # ── .ipynb parser ──────────────────────────────────────────────────────────
 
     def _parse_notebook(self, file_path: str, repo_name=None, branch="main") -> Dict:
@@ -540,3 +519,24 @@ def generate_experiment_hash(metadata: Dict) -> str:
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"}
         except Exception as e:
             return {"error": str(e)}
+
+
+def generate_experiment_hash(metadata: Dict) -> str:
+    """
+    Stable MD5 hash of (model names + params + preprocessing names).
+    Identical experiments produce the same hash regardless of run order.
+    """
+    key = _json_mod.dumps(
+        {
+            "models": sorted(
+                [{"name": m.get("name", ""), "params": m.get("params") or {}}
+                 for m in metadata.get("models", [])],
+                key=lambda x: x["name"],
+            ),
+            "preprocessing": sorted(
+                [p.get("name", "") for p in metadata.get("preprocessing", [])],
+            ),
+        },
+        sort_keys=True,
+    )
+    return hashlib.md5(key.encode()).hexdigest()
