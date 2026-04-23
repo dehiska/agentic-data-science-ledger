@@ -272,7 +272,7 @@ with st.sidebar:
     st.divider()
 
     # GitHub settings
-    with st.expander("🔗 Connect to GitHub", expanded=False):
+    with st.expander("🔗 GitHub Username (required for Leaderboard)", expanded=True):
         st.caption("Optional — used to tag experiments with repo info and your username.")
         repo_name = st.text_input("GitHub Repo", placeholder="username/repo-name", key="gh_repo")
         branch = st.text_input("Branch", value="main", key="gh_branch")
@@ -320,7 +320,23 @@ with tab_upload:
     # Project picker for upload
     upload_proj_options = {p["name"]: p["id"] for p in projects}
     upload_proj_options = {"No project (unassigned)": None, **upload_proj_options}
-    upload_proj_label = st.selectbox("Assign to project", list(upload_proj_options.keys()), key="upload_proj")
+
+    _up_col1, _up_col2 = st.columns([2, 1])
+    with _up_col1:
+        upload_proj_label = st.selectbox("Assign to project", list(upload_proj_options.keys()), key="upload_proj")
+    with _up_col2:
+        _upload_author = st.text_input(
+            "Your GitHub Username ✱",
+            value=st.session_state.get("gh_user", ""),
+            placeholder="e.g. dehiska",
+            key="upload_author_field",
+            help="Required — appears in the Leaderboard and Experiment Tree.",
+        )
+        if _upload_author.strip():
+            st.session_state["gh_user"] = _upload_author.strip()
+        elif not st.session_state.get("gh_user"):
+            st.warning("⚠️ Enter your GitHub username so your name appears in the Leaderboard.")
+
     upload_proj_id = upload_proj_options[upload_proj_label]
 
     st.caption("Supported: `.ipynb` notebooks · `.py` scripts · `.docx` documents · `.json` ledger entries · `.csv` datasets")
@@ -1264,11 +1280,23 @@ with tab_swarm:
                 key="swarm_proj",
             )
 
-        swarm_goal = st.text_input(
-            "🎯 Goal",
-            value="Maximize F1 on the test set",
-            help="Stored in the trace log and ledger entry.",
-        )
+        _swarm_author_col, _swarm_goal_col = st.columns([1, 2])
+        with _swarm_author_col:
+            _swarm_author = st.text_input(
+                "Your GitHub Username ✱",
+                value=st.session_state.get("gh_user", ""),
+                placeholder="e.g. dehiska",
+                key="swarm_author_field",
+                help="Tags the swarm ledger entry with your name in the Leaderboard.",
+            )
+            if _swarm_author.strip():
+                st.session_state["gh_user"] = _swarm_author.strip()
+        with _swarm_goal_col:
+            swarm_goal = st.text_input(
+                "🎯 Goal",
+                value="Maximize F1 on the test set",
+                help="Stored in the trace log and ledger entry.",
+            )
         launch_btn = st.form_submit_button("🚀 Launch Swarm", type="primary")
 
     # ── Result display helper ──────────────────────────────────────────────────
