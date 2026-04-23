@@ -238,7 +238,7 @@ with st.sidebar:
     # Create new project
     with st.expander("➕ New Project", expanded=False):
         new_name = st.text_input("Project name", key="new_proj_name")
-        new_desc = st.text_area("Description (optional)", key="new_proj_desc", height=60)
+        new_desc = st.text_area("Description (optional)", key="new_proj_desc", height=68)
         if st.button("Create Project", type="primary", key="btn_create_proj"):
             if not new_name.strip():
                 st.warning("Enter a project name.")
@@ -290,8 +290,9 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_upload, tab_ledger, tab_tree, tab_plan, tab_swarm, tab_costs, tab_traces, tab_snippet = st.tabs([
+tab_upload, tab_leaderboard, tab_ledger, tab_tree, tab_plan, tab_swarm, tab_costs, tab_traces, tab_snippet = st.tabs([
     "📂 Upload Files",
+    "🏆 Leaderboard",
     "📜 Ledger",
     "🌳 Experiment Tree",
     "🤖 Agent Plan",
@@ -485,7 +486,156 @@ with tab_upload:
         for idx in sorted(confirmed_indices, reverse=True):
             st.session_state["pending_confirmations"].pop(idx)
 
-# ── Tab 2: Ledger ──────────────────────────────────────────────────────────────
+# ── Tab 2: Leaderboard ─────────────────────────────────────────────────────────
+
+with tab_leaderboard:
+    import pandas as pd
+    import plotly.express as px
+
+    st.header("🏆 Team Leaderboard")
+    st.caption("All confirmed experiments ranked by metric — across every project and team member.")
+
+    lb_col1, lb_col2 = st.columns([4, 1])
+    with lb_col2:
+        if st.button("🔄 Refresh", key="refresh_lb"):
+            st.rerun()
+
+    all_lb_entries = load_ledger(project_id=None)
+
+    def _build_full_leaderboard(entries: list) -> list:
+        rows = []
+        for e in entries:
+            # Prefer user-confirmed data; fall back to raw parse
+            uc = e.get("user_corrected") or {}
+            if isinstance(uc, str):
+                try:
+                    import json as _j; uc = _j.loads(uc)
+                except Exception:
+                    uc = {}
+
+            metrics      = uc.get("metrics") or e.get("metrics") or []
+            models       = uc.get("models")  or e.get("models")  or []
+            model_name   = models[0]["name"]   if models else "—"
+            model_family = models[0].get("family", "Other") if models else "Other"
+
+            # Author: team_member column takes priority
+            author = (e.get("team_member") or
+                      uc.get("team_member") or
+                      st.session_state.get("gh_user") or "—")
+
+            # AutoML used? — swarm CSV entries, or flaml flag in model dict
+            flaml_used = any(
+                m.get("flaml") is True for m in models
+            ) if models else False
+            is_automl = (
+                e.get("file_type") == "csv"   # came from Swarm
+                or flaml_used
+                or e.get("status") == "Executed"   # came from autoresearch
+            )
+            automl_label = "✅ FLAML" if flaml_used else ("🔬 AutoML" if is_automl else "—")
+
+            for m in metrics:
+                val = m.get("value")
+                if isinstance(val, (int, float)):
+                    rows.append({
+                        "Entry":    f"#{e['id']}",
+                        "Dataset":  e.get("file_path", "?"),
+                        "Model":    model_name,
+                        "Family":   model_family or "Other",
+                        "Metric":   m["name"],
+                        "Score":    round(float(val), 4),
+                        "Author":   author,
+                        "AutoML":   automl_label,
+                        "Project":  e.get("project_name", "—"),
+                        "Status":   e.get("status", "Pending"),
+                        "_approved": bool(e.get("approved")),
+                    })
+        return rows
+
+    lb_rows = _build_full_leaderboard(all_lb_entries)
+
+    if not lb_rows:
+        st.info(
+            "No scored experiments yet.\n\n"
+            "Upload a file in **📂 Upload Files** and confirm metrics, "
+            "or run the **🐝 Swarm AutoML** pipeline — results appear here automatically."
+        )
+    else:
+        lb_df = pd.DataFrame(lb_rows)
+
+        # ── Filter controls ────────────────────────────────────────────────────
+        fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 1])
+        metric_names   = sorted(lb_df["Metric"].unique())
+        sel_metric     = fc1.selectbox("Metric", metric_names, key="lb2_metric")
+        higher_better  = fc2.checkbox("Higher = better", value=True, key="lb2_higher")
+        approved_only  = fc3.checkbox("Confirmed entries only", value=False, key="lb2_approved")
+        group_family   = fc4.checkbox("Best/family", value=False, key="lb2_family")
+
+        filtered = lb_df[lb_df["Metric"] == sel_metric].copy()
+        if approved_only:
+            filtered = filtered[filtered["_approved"]]
+        filtered = filtered.sort_values("Score", ascending=not higher_better).reset_index(drop=True)
+
+        if group_family:
+            agg_fn = "idxmax" if higher_better else "idxmin"
+            idx = filtered.groupby("Family")["Score"].agg(agg_fn)
+            filtered = filtered.loc[idx.values].sort_values(
+                "Score", ascending=not higher_better
+            ).reset_index(drop=True)
+
+        filtered.insert(0, "Rank", range(1, len(filtered) + 1))
+
+        # ── Podium metrics ─────────────────────────────────────────────────────
+        if len(filtered) >= 1:
+            p_cols = st.columns(min(3, len(filtered)))
+            medals = ["🥇", "🥈", "🥉"]
+            for i, col in enumerate(p_cols):
+                row = filtered.iloc[i]
+                col.metric(
+                    f"{medals[i]} {row['Author']}",
+                    f"{row['Score']:.4f}",
+                    delta=row["Model"],
+                )
+
+        st.divider()
+
+        # ── Full table ─────────────────────────────────────────────────────────
+        display_cols = ["Rank", "Dataset", "Model", "Family",
+                        "Score", "Author", "AutoML", "Project", "Status", "Entry"]
+        st.dataframe(
+            filtered[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Score":  st.column_config.NumberColumn(format="%.4f"),
+                "AutoML": st.column_config.TextColumn(width="small"),
+                "Rank":   st.column_config.NumberColumn(width="small"),
+            },
+        )
+
+        # ── Score distribution by author ───────────────────────────────────────
+        if filtered["Author"].nunique() > 1:
+            with st.expander("📊 Score by team member", expanded=False):
+                fig = px.box(
+                    filtered, x="Author", y="Score", color="Author",
+                    points="all",
+                    title=f"{sel_metric} distribution by team member",
+                )
+                fig.update_layout(height=340, margin=dict(t=40, b=20), showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+
+        # ── AutoML vs manual breakdown ─────────────────────────────────────────
+        with st.expander("🤖 AutoML vs Manual breakdown", expanded=False):
+            automl_counts = filtered["AutoML"].value_counts().reset_index()
+            automl_counts.columns = ["Type", "Count"]
+            fig2 = px.pie(automl_counts, names="Type", values="Count",
+                          title="AutoML vs Manual entries",
+                          color_discrete_sequence=["#4C9BE8", "#EF553B", "#636EFA"])
+            fig2.update_layout(height=300, margin=dict(t=40, b=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+
+# ── Tab 3: Ledger ──────────────────────────────────────────────────────────────
 
 with tab_ledger:
     proj_label = selected_label if selected_project_id else "All Projects"
@@ -587,7 +737,7 @@ with tab_ledger:
                         st.subheader("📄 Document Preview")
                         st.text(entry["raw_text"][:800] + ("..." if len(entry.get("raw_text","")) > 800 else ""))
 
-# ── Tab 3: Experiment Tree ────────────────────────────────────────────────────
+# ── Tab 4: Experiment Tree ────────────────────────────────────────────────────
 
 _AUTHOR_COLORS = [
     "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A",
@@ -722,7 +872,7 @@ with tab_tree:
             st.caption("Open circles = no confirmed value for this metric. Connect lines = same project, ordered by time.")
 
 
-# ── Tab 4: Agent Plan ──────────────────────────────────────────────────────────
+# ── Tab 5: Agent Plan ──────────────────────────────────────────────────────────
 
 def _build_spec_md(selected_file: str, goal: str, plan: dict, validation: dict, autoresearch: dict) -> str:
     from datetime import datetime as _dt
@@ -977,7 +1127,7 @@ with tab_plan:
             with st.expander("🔎 Full JSON"):
                 st.json(result)
 
-# ── Tab 5: Swarm AutoML ────────────────────────────────────────────────────────
+# ── Tab 6: Swarm AutoML ────────────────────────────────────────────────────────
 
 with tab_swarm:
     st.header("🐝 Swarm AutoML")
@@ -1221,7 +1371,7 @@ with tab_swarm:
             st.json(swarm_result)
 
 
-# ── Tab 6: Costs ───────────────────────────────────────────────────────────────
+# ── Tab 7: Costs ───────────────────────────────────────────────────────────────
 
 with tab_costs:
     st.header("💰 Cost Dashboard")
@@ -1289,7 +1439,7 @@ with tab_costs:
         display_df["Type"] = display_df["Type"].replace({"agent_plan": "🤖 Agent Plan", "autoresearch": "⚡ Autoresearch"})
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-# ── Tab 6: Trace Log ──────────────────────────────────────────────────────────
+# ── Tab 8: Trace Log ──────────────────────────────────────────────────────────
 
 with tab_traces:
     st.header("🔍 Trace Log")
@@ -1375,7 +1525,7 @@ with tab_traces:
                     st.caption(f"`{nb_path}` — not available for download in cloud mode")
 
 
-# ── Tab 7: Notebook Snippet ────────────────────────────────────────────────────
+# ── Tab 9: Notebook Snippet ────────────────────────────────────────────────────
 
 with tab_snippet:
     st.header("📋 Notebook Logging Cell")
