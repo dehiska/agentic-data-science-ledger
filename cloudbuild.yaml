@@ -72,11 +72,11 @@ steps:
       - --region=${_REGION}
       - --platform=managed
       - --allow-unauthenticated
-      - --memory=1Gi
-      - --cpu=1
+      - --memory=4Gi
+      - --cpu=2
       - --min-instances=0
       - --max-instances=3
-      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_ANTHROPIC_API_KEY}
+      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_ANTHROPIC_API_KEY},MAX_ROWS_PER_AGENT=150000,TIME_BUDGET_PER_AGENT=60
 
   # ── 6. Get backend URL and deploy frontend ───────────────────────────────────
   # Write URL to file first — avoids $VAR substitution validation in Cloud Build
@@ -104,7 +104,7 @@ steps:
           --region=${_REGION} \
           --platform=managed \
           --allow-unauthenticated \
-          --memory=1Gi \
+          --memory=2Gi \
           --cpu=1 \
           --min-instances=0 \
           --max-instances=3 \

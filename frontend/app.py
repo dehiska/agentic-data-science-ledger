@@ -28,7 +28,7 @@ st.set_page_config(
 
 APP_MODE = os.getenv("APP_MODE", "local")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8080")
-SUPPORTED_TYPES = [".ipynb", ".py", ".docx", ".json"]
+SUPPORTED_TYPES = [".ipynb", ".py", ".docx", ".json", ".csv"]
 
 FAMILY_OPTIONS = [
     "Ensemble", "Linear", "Deep Neural Network", "Boosting",
@@ -290,11 +290,12 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_upload, tab_ledger, tab_tree, tab_plan, tab_costs, tab_traces, tab_snippet = st.tabs([
+tab_upload, tab_ledger, tab_tree, tab_plan, tab_swarm, tab_costs, tab_traces, tab_snippet = st.tabs([
     "📂 Upload Files",
     "📜 Ledger",
     "🌳 Experiment Tree",
     "🤖 Agent Plan",
+    "🐝 Swarm AutoML",
     "💰 Costs",
     "🔍 Trace Log",
     "📋 Notebook Snippet",
@@ -321,10 +322,10 @@ with tab_upload:
     upload_proj_label = st.selectbox("Assign to project", list(upload_proj_options.keys()), key="upload_proj")
     upload_proj_id = upload_proj_options[upload_proj_label]
 
-    st.caption("Supported: `.ipynb` notebooks · `.py` scripts · `.docx` documents · `.json` ledger entries")
+    st.caption("Supported: `.ipynb` notebooks · `.py` scripts · `.docx` documents · `.json` ledger entries · `.csv` datasets")
     uploaded_files = st.file_uploader(
         "Upload files",
-        type=["ipynb", "py", "docx", "doc", "json"],
+        type=["ipynb", "py", "docx", "doc", "json", "csv"],
         accept_multiple_files=True,
         key="file_uploader",
     )
@@ -976,7 +977,251 @@ with tab_plan:
             with st.expander("🔎 Full JSON"):
                 st.json(result)
 
-# ── Tab 5: Costs ───────────────────────────────────────────────────────────────
+# ── Tab 5: Swarm AutoML ────────────────────────────────────────────────────────
+
+with tab_swarm:
+    st.header("🐝 Swarm AutoML")
+    st.caption(
+        "Divide-and-conquer AutoML: the dataset is split into stratified chunks, "
+        "one **SwarmWorkerAgent** per chunk runs FLAML in parallel, results are "
+        "aggregated by model family, and the global champion is stored in the ledger."
+    )
+
+    st.info(
+        "**How to use:**\n\n"
+        "1. Enter the path to your training CSV (absolute or relative to the repo root)\n"
+        "2. Optionally point to an EDA notebook/script — the agent will auto-detect the "
+        "target column and task type from your code\n"
+        "3. Tune the swarm settings, then click **🚀 Launch Swarm**\n\n"
+        "Results stream into the **🔍 Trace Log** tab in real time.",
+        icon="💡",
+    )
+
+    # ── Config form ────────────────────────────────────────────────────────────
+    with st.form("swarm_form"):
+        s_col1, s_col2 = st.columns(2)
+
+        with s_col1:
+            csv_path_input = st.text_input(
+                "📊 Training CSV path",
+                placeholder=r"C:\Users\...\train.csv",
+                help="Full path to the CSV dataset file.",
+            )
+            eda_file_input = st.text_input(
+                "🔬 EDA file (optional)",
+                placeholder="notebooks/eda.ipynb",
+                help="Any .ipynb / .py / .docx / .json file — "
+                     "used to auto-detect target column and task type.",
+            )
+            target_col_input = st.text_input(
+                "🎯 Target column",
+                placeholder="auto-detect from EDA file",
+                help="Leave blank to auto-detect from EDA file or column names.",
+            )
+            task_type_input = st.selectbox(
+                "📐 Task type",
+                ["auto-detect", "classification", "regression"],
+                help="Auto-detect reads from EDA file or target column cardinality.",
+            )
+
+        with s_col2:
+            time_budget = st.slider(
+                "⏱ FLAML time budget per agent (seconds)",
+                min_value=15, max_value=600, value=60, step=15,
+                help="Each worker gets this many seconds of FLAML search. "
+                     "Longer = better models, more wall-clock time.",
+            )
+            max_rows = st.number_input(
+                "📏 Max rows per agent",
+                min_value=1_000, max_value=500_000,
+                value=150_000, step=10_000,
+                help="n_agents = ceil(total_rows / this value). "
+                     "Each agent trains on one stratified chunk.",
+            )
+            max_parallel = st.slider(
+                "⚡ Max parallel agents",
+                min_value=1, max_value=8, value=4,
+                help="Capped by CPU count. More parallel = faster but more RAM.",
+            )
+            swarm_proj_label = st.selectbox(
+                "📁 Assign to project",
+                ["No project (unassigned)"] + [p["name"] for p in load_projects()],
+                key="swarm_proj",
+            )
+
+        swarm_goal = st.text_input(
+            "🎯 Goal",
+            value="Maximize F1 on the test set",
+            help="Stored in the trace log and ledger entry.",
+        )
+        launch_btn = st.form_submit_button("🚀 Launch Swarm", type="primary")
+
+    # ── Result display helper ──────────────────────────────────────────────────
+    def _display_swarm_result(result: dict):
+        if result.get("status") != "success":
+            st.error(f"Swarm failed: {result.get('error', '?')}")
+            return
+
+        best = result.get("best_model", {})
+        metrics = best.get("metrics", {})
+        val_score = metrics.get("val_score", 0.0)
+        flaml_used = best.get("flaml", False)
+
+        st.success(
+            f"🏆 Champion: **{best.get('name')}** "
+            f"({best.get('family', '?')})  |  "
+            f"val_score = **{val_score:.4f}**  |  "
+            f"{'🧪 FLAML' if flaml_used else '⚙️ sklearn fallback'}"
+        )
+
+        # Summary metrics row
+        m_cols = st.columns(4)
+        m_cols[0].metric("Agents launched", result.get("n_agents", "?"))
+        m_cols[1].metric("Agents succeeded", result.get("n_succeeded", "?"))
+        m_cols[2].metric("Rows trained on", f"{result.get('n_rows', 0):,}")
+        m_cols[3].metric("Ledger entry", f"#{result.get('entry_id', '—')}")
+
+        # Per-agent leaderboard
+        worker_results = result.get("all_worker_results", [])
+        if worker_results:
+            import pandas as pd
+            rows = []
+            for r in worker_results:
+                bm = r.get("best_model", {})
+                rows.append({
+                    "Agent":   r.get("agent_id", "?"),
+                    "Model":   bm.get("name", "?"),
+                    "Family":  bm.get("family", "?"),
+                    "Score":   round(bm.get("metrics", {}).get("val_score", 0), 4),
+                    "Rows":    f"{bm.get('n_rows_trained', 0):,}",
+                    "FLAML":   "✅" if bm.get("flaml") else "⚙️",
+                })
+            df_lb = (
+                pd.DataFrame(rows)
+                .sort_values("Score", ascending=False)
+                .reset_index(drop=True)
+            )
+            df_lb.insert(0, "Rank", range(1, len(df_lb) + 1))
+            with st.expander("📊 Per-agent leaderboard", expanded=True):
+                st.dataframe(df_lb, use_container_width=True, hide_index=True)
+
+        # Champion hyperparameters
+        params = best.get("params", {})
+        if params:
+            with st.expander("⚙️ Champion hyperparameters"):
+                st.json(params)
+
+        # Family tree visualisation
+        worker_results = result.get("all_worker_results", [])
+        if worker_results:
+            try:
+                import plotly.graph_objects as go
+                import pandas as pd
+
+                by_family: dict = {}
+                for r in worker_results:
+                    bm = r["best_model"]
+                    fam = bm.get("family", "Unknown")
+                    s   = bm["metrics"].get("val_score", 0)
+                    if fam not in by_family or s > by_family[fam]["score"]:
+                        by_family[fam] = {"name": bm["name"], "score": s}
+
+                families = list(by_family.keys())
+                scores   = [by_family[f]["score"] for f in families]
+                names    = [by_family[f]["name"]  for f in families]
+                champion_fam = best.get("family", families[0] if families else "")
+
+                colors = [
+                    "#FFD700" if f == champion_fam else "#4C9BE8"
+                    for f in families
+                ]
+                fig = go.Figure(go.Bar(
+                    x=families, y=scores,
+                    text=[f"{n}<br>{s:.4f}" for n, s in zip(names, scores)],
+                    textposition="outside",
+                    marker_color=colors,
+                    hovertemplate="%{x}<br>%{text}<extra></extra>",
+                ))
+                fig.update_layout(
+                    title="Swarm: best score per model family (🥇 = champion)",
+                    yaxis_title="Val Score",
+                    height=340,
+                    margin=dict(t=50, b=30),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                pass  # plotly might not be available
+
+        run_id = result.get("run_id")
+        if run_id:
+            st.caption(
+                f"Run ID: `{run_id}` — full iteration trace in **🔍 Trace Log** tab"
+            )
+
+    # ── Launch & render ────────────────────────────────────────────────────────
+    if launch_btn:
+        if not csv_path_input.strip():
+            st.warning("Enter the path to your training CSV.")
+        else:
+            _target = target_col_input.strip() or None
+            _task   = None if task_type_input == "auto-detect" else task_type_input
+            _eda    = eda_file_input.strip() or None
+
+            # Resolve project_id
+            _swarm_proj_id = None
+            if swarm_proj_label != "No project (unassigned)":
+                for p in load_projects():
+                    if p["name"] == swarm_proj_label:
+                        _swarm_proj_id = p["id"]
+                        break
+
+            with st.spinner(
+                f"🐝 Swarm running — this may take "
+                f"{max_parallel * time_budget // 60 + 1}+ minutes…"
+            ):
+                if APP_MODE == "cloud":
+                    result = api("POST", "/swarm/run", json={
+                        "csv_path": csv_path_input.strip(),
+                        "eda_file": _eda,
+                        "target_col": _target,
+                        "task_type": _task,
+                        "time_budget_per_agent": time_budget,
+                        "max_rows_per_agent": int(max_rows),
+                        "max_parallel_agents": max_parallel,
+                        "project_id": _swarm_proj_id,
+                        "team_member": st.session_state.get("gh_user") or None,
+                        "goal": swarm_goal,
+                    })
+                else:
+                    from src.swarm_orchestrator import SwarmOrchestrator
+                    orch = SwarmOrchestrator(db=get_db_direct())
+                    result = orch.run_swarm(
+                        csv_path=csv_path_input.strip(),
+                        eda_file=_eda,
+                        target_col=_target,
+                        task_type=_task,
+                        time_budget_per_agent=time_budget,
+                        max_rows_per_agent=int(max_rows),
+                        max_parallel_agents=max_parallel,
+                        project_id=_swarm_proj_id,
+                        team_member=st.session_state.get("gh_user") or None,
+                        goal=swarm_goal,
+                    )
+
+            if result:
+                st.session_state["swarm_result"] = result
+
+    # Persist result across re-runs
+    swarm_result = st.session_state.get("swarm_result")
+    if swarm_result:
+        st.divider()
+        _display_swarm_result(swarm_result)
+        with st.expander("🔎 Full JSON"):
+            st.json(swarm_result)
+
+
+# ── Tab 6: Costs ───────────────────────────────────────────────────────────────
 
 with tab_costs:
     st.header("💰 Cost Dashboard")

@@ -171,8 +171,10 @@ class MCPServer:
             return self._parse_docx(file_path)
         elif ext == ".json":
             return self._parse_json(file_path)
+        elif ext == ".csv":
+            return self._parse_csv(file_path)
         else:
-            raise ValueError(f"Unsupported file type: {ext}. Supported: .ipynb, .py, .docx, .json")
+            raise ValueError(f"Unsupported file type: {ext}. Supported: .ipynb, .py, .docx, .json, .csv")
 
     # Keep old name for backwards compatibility
     def parse_notebook(self, file_path: str, repo_name=None, branch="main", team_member=None) -> Dict:
@@ -509,6 +511,91 @@ class MCPServer:
                     "name": "GradientBoosting", "family": family,
                     "params": {"objective": obj}, "source": "objective key",
                 })
+
+    # ── .csv dataset parser ────────────────────────────────────────────────────
+
+    def _parse_csv(self, file_path: str) -> Dict:
+        """
+        Parse a CSV dataset file — extracts shape, column info, dtypes, and
+        heuristically guesses the target column and task type.
+
+        Reads only the header + a small sample to keep memory usage low —
+        the full dataset is loaded later by SwarmOrchestrator.
+        """
+        import pandas as pd
+
+        COMMON_TARGETS = {
+            "target", "label", "y", "class", "outcome", "response",
+            "cancel", "churn", "default", "fraud", "is_fraud", "survived",
+            "status", "result", "price", "sales", "revenue",
+        }
+
+        try:
+            df_sample = pd.read_csv(file_path, nrows=500, low_memory=False)
+        except Exception as e:
+            return {
+                "file_path": file_path,
+                "file_type": "csv",
+                "cells": [],
+                "environment": {},
+                "models": [],
+                "metrics": [],
+                "preprocessing": [],
+                "raw_text": f"Error reading CSV: {e}",
+                "dataset_info": {},
+            }
+
+        # Count total rows cheaply (no full load)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                n_rows = sum(1 for _ in f) - 1  # subtract header
+        except Exception:
+            n_rows = len(df_sample)
+
+        columns = df_sample.columns.tolist()
+        dtypes = {col: str(df_sample[col].dtype) for col in columns}
+
+        # Guess target column from names
+        target_col = None
+        for col in columns:
+            if col.lower() in COMMON_TARGETS:
+                target_col = col
+                break
+
+        # Guess task type from target column cardinality
+        task_type = "unknown"
+        if target_col:
+            nunique = df_sample[target_col].nunique()
+            task_type = "classification" if nunique <= 20 else "regression"
+
+        dataset_info = {
+            "n_rows": n_rows,
+            "n_cols": len(columns),
+            "columns": columns,
+            "dtypes": dtypes,
+            "target_col_guess": target_col,
+            "task_type_guess": task_type,
+            "sample": df_sample.head(3).to_dict(orient="records"),
+        }
+
+        col_summary = ", ".join(columns[:15]) + ("…" if len(columns) > 15 else "")
+        raw_text = (
+            f"CSV Dataset: {n_rows:,} rows × {len(columns)} cols.\n"
+            f"Columns: {col_summary}\n"
+            f"Guessed target: {target_col or 'unknown'} | Task: {task_type}"
+        )
+
+        return {
+            "file_path": file_path,
+            "file_type": "csv",
+            "cells": [],
+            "environment": {},
+            "models": [],
+            "metrics": [],
+            "preprocessing": [],
+            "raw_text": raw_text,
+            "dataset_info": dataset_info,
+        }
 
     def _extract_environment(self) -> Dict:
         try:

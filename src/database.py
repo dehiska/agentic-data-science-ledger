@@ -85,6 +85,10 @@ class LocalDatabase:
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE ledger ADD COLUMN {col} {definition}")
 
+        # team_member column (added for swarm AutoML ledger entries)
+        if "team_member" not in existing:
+            self.conn.execute("ALTER TABLE ledger ADD COLUMN team_member TEXT DEFAULT NULL")
+
         # Costs table migrations
         costs_existing = {row[1] for row in self.conn.execute("PRAGMA table_info(costs)")}
         costs_migrations = [
@@ -140,6 +144,7 @@ class LocalDatabase:
         auto_extracted: Optional[Dict] = None,
         confidence_score: Optional[float] = None,
         experiment_hash: Optional[str] = None,
+        team_member: Optional[str] = None,
         **kwargs,
     ) -> int:
         cursor = self.conn.cursor()
@@ -147,8 +152,9 @@ class LocalDatabase:
             """
             INSERT INTO ledger
               (project_id, file_path, file_type, environment, models, metrics,
-               preprocessing, raw_text, auto_extracted, confidence_score, experiment_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               preprocessing, raw_text, auto_extracted, confidence_score,
+               experiment_hash, team_member)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -162,6 +168,7 @@ class LocalDatabase:
                 json.dumps(auto_extracted) if auto_extracted is not None else None,
                 confidence_score,
                 experiment_hash,
+                team_member,
             ),
         )
         self.conn.commit()

@@ -55,7 +55,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPPORTED_TYPES = {".ipynb", ".py", ".docx", ".doc", ".json"}
+SUPPORTED_TYPES = {".ipynb", ".py", ".docx", ".doc", ".json", ".csv"}
 
 # ── Singletons ─────────────────────────────────────────────────────────────────
 
@@ -117,6 +117,19 @@ class AutoresearchRequest(BaseModel):
     repo_name: Optional[str] = None
     branch: str = "main"
     team_member: Optional[str] = None
+
+
+class SwarmRequest(BaseModel):
+    csv_path: str
+    eda_file: Optional[str] = None
+    target_col: Optional[str] = None
+    task_type: Optional[str] = None          # "classification" | "regression"
+    time_budget_per_agent: int = 60          # seconds of FLAML search per worker
+    max_rows_per_agent: int = 150_000        # rows per swarm chunk
+    max_parallel_agents: int = 4
+    project_id: Optional[int] = None
+    team_member: Optional[str] = None
+    goal: str = "Maximize F1"
 
 
 class InferRequest(BaseModel):
@@ -375,6 +388,39 @@ def run_autoresearch(req: AutoresearchRequest):
 def get_costs():
     db, _, _, _ = get_services()
     return {"costs": db.get_costs()}
+
+
+# ── Swarm AutoML ───────────────────────────────────────────────────────────────
+
+@app.post("/swarm/run")
+def run_swarm(req: SwarmRequest):
+    """
+    Divide-and-conquer AutoML over a CSV dataset.
+
+    Splits the CSV into stratified chunks, runs FLAML on each chunk in
+    parallel (swarm of SwarmWorkerAgents), then aggregates results by
+    model family and returns the global champion.
+
+    All agent actions are logged to the traces table (visible in the
+    Trace Log tab) under the returned run_id.
+    """
+    from src.swarm_orchestrator import SwarmOrchestrator
+    if not Path(req.csv_path).exists():
+        raise HTTPException(404, f"CSV not found: {req.csv_path}")
+    db, _, _, _ = get_services()
+    orch = SwarmOrchestrator(db=db)
+    return orch.run_swarm(
+        csv_path=req.csv_path,
+        eda_file=req.eda_file,
+        target_col=req.target_col,
+        task_type=req.task_type,
+        time_budget_per_agent=req.time_budget_per_agent,
+        max_rows_per_agent=req.max_rows_per_agent,
+        max_parallel_agents=req.max_parallel_agents,
+        project_id=req.project_id,
+        team_member=req.team_member,
+        goal=req.goal,
+    )
 
 
 # ── Traces ─────────────────────────────────────────────────────────────────────
