@@ -74,6 +74,17 @@ class LocalDatabase:
         for col, definition in migrations:
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE ledger ADD COLUMN {col} {definition}")
+
+        # Costs table migrations
+        costs_existing = {row[1] for row in self.conn.execute("PRAGMA table_info(costs)")}
+        costs_migrations = [
+            ("cost_type",    "TEXT DEFAULT 'autoresearch'"),
+            ("description",  "TEXT DEFAULT ''"),
+        ]
+        for col, definition in costs_migrations:
+            if col not in costs_existing:
+                self.conn.execute(f"ALTER TABLE costs ADD COLUMN {col} {definition}")
+
         self.conn.commit()
 
     # ── Projects ───────────────────────────────────────────────────────────────
@@ -254,10 +265,18 @@ class LocalDatabase:
 
     # ── Costs ──────────────────────────────────────────────────────────────────
 
-    def log_cost(self, plan_id: int, gcp_instance: str, time_hours: float, cost: float):
+    def log_cost(
+        self,
+        plan_id: Optional[int],
+        gcp_instance: str,
+        time_hours: float,
+        cost: float,
+        cost_type: str = "autoresearch",
+        description: str = "",
+    ):
         self.conn.execute(
-            "INSERT INTO costs (plan_id, gcp_instance, time_hours, cost) VALUES (?, ?, ?, ?)",
-            (plan_id, gcp_instance, time_hours, cost),
+            "INSERT INTO costs (plan_id, gcp_instance, time_hours, cost, cost_type, description) VALUES (?, ?, ?, ?, ?, ?)",
+            (plan_id, gcp_instance, time_hours, cost, cost_type, description),
         )
         self.conn.commit()
 
@@ -395,10 +414,23 @@ class CloudDatabase:
             row["project_name"] = proj.get("name", "—") if isinstance(proj, dict) else "—"
         return rows
 
-    def log_cost(self, plan_id: int, gcp_instance: str, time_hours: float, cost: float):
-        self.db.table("costs").insert(
-            {"plan_id": plan_id, "gcp_instance": gcp_instance, "time_hours": time_hours, "cost": cost}
-        ).execute()
+    def log_cost(
+        self,
+        plan_id: Optional[int],
+        gcp_instance: str,
+        time_hours: float,
+        cost: float,
+        cost_type: str = "autoresearch",
+        description: str = "",
+    ):
+        self.db.table("costs").insert({
+            "plan_id": plan_id,
+            "gcp_instance": gcp_instance,
+            "time_hours": time_hours,
+            "cost": cost,
+            "cost_type": cost_type,
+            "description": description,
+        }).execute()
 
     def get_costs(self) -> List[Dict]:
         return self.db.table("costs").select("*").order("timestamp", desc=True).execute().data

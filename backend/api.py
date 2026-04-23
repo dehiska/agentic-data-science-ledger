@@ -334,12 +334,28 @@ def delete_ledger_entry(entry_id: int):
 
 @app.post("/plan/generate")
 def generate_plan(req: PlanRequest):
-    _, _, orchestrator, _ = get_services()
-    return orchestrator.run_pipeline(
+    db, _, orchestrator, _ = get_services()
+    result = orchestrator.run_pipeline(
         file_path=req.file_path, goal=req.goal,
         repo_name=req.repo_name, branch=req.branch,
         team_member=req.team_member, execute_autoresearch=req.execute_autoresearch,
     )
+    # Log agent-plan LLM cost from the resource estimate
+    try:
+        cost_est = result.get("plan", {}).get("resource_estimate", {})
+        total = float(cost_est.get("total_cost") or 0)
+        if total > 0:
+            db.log_cost(
+                plan_id=None,
+                gcp_instance=cost_est.get("gcp_instance", "claude-3-5-haiku"),
+                time_hours=float(cost_est.get("time_hours") or 0),
+                cost=total,
+                cost_type="agent_plan",
+                description=(req.goal or "")[:120],
+            )
+    except Exception:
+        pass
+    return result
 
 
 @app.post("/autoresearch/run")

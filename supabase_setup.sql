@@ -65,11 +65,18 @@ CREATE TABLE IF NOT EXISTS costs (
     gcp_instance    TEXT,
     time_hours      REAL,
     cost            REAL,
-    timestamp       TIMESTAMPTZ DEFAULT NOW()
+    timestamp       TIMESTAMPTZ DEFAULT NOW(),
+    -- v2.1: distinguish agent plan costs from autoresearch compute costs
+    cost_type       TEXT DEFAULT 'autoresearch',
+    description     TEXT DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_costs_plan_id   ON costs(plan_id);
 CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp DESC);
+
+-- Run these if the costs table already exists (add new v2.1 columns):
+-- ALTER TABLE costs ADD COLUMN IF NOT EXISTS cost_type TEXT DEFAULT 'autoresearch';
+-- ALTER TABLE costs ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
 
 -- ── Row Level Security (optional, recommended for multi-user) ─────────────────
 -- Uncomment to restrict reads to authenticated users only:
