@@ -1,195 +1,157 @@
-# Spec: Three-Agent Autoresearch Pipeline
-*Updated to match the existing Agentic DS Ledger tech stack*
+# Agentic DS Ledger — Three-Agent Autoresearch Pipeline
+### Spec v1.0 · April 2026
+**Repo:** https://github.com/dehiska/agentic-data-science-ledger
 
 ---
 
-## 1. High-Level Workflow
+## Overview
+
+This spec describes the next evolution of the Agentic DS Ledger: a fully automated three-agent pipeline that takes a dataset, searches for the best model configuration, and delivers a ready-to-run optimised notebook — all logged in real time to the existing ledger and traceable from the Streamlit dashboard.
+
+The pipeline runs entirely on the existing infrastructure (GCP Cloud Run + Supabase + Streamlit) with no new frameworks or services required.
+
+---
+
+## Goals
+
+- **Automate the full experiment loop** — from raw dataset to optimised model to ledger entry — with no manual steps
+- **Stratified sampling** — Agent A works on a representative subset so the loop is fast even on million-row datasets
+- **Full observability** — every agent action is logged to a trace feed visible in the dashboard in real time
+- **Zero new infrastructure** — build on top of what already exists
+
+---
+
+## How It Works
 
 ```
-Agent A (AutoResearcher)
-  → stratified sample → finds best model/params
-        │
-        ▼
-Agent B (Middleman / Orchestrator)
-  → validates, logs trace, coordinates
-        │
-        ▼
-Agent C (Executor/Builder)
-  → generates notebook, logs result to ledger
-        │
-        ▼
-Streamlit Frontend
-  → live trace log tab shows the full run
-```
-
----
-
-## 2. Tech Stack Mapping
-
-| Spec Component | ~~Mistral Suggestion~~ | **What We Already Have** |
-|----------------|------------------------|--------------------------|
-| Agent A | Fork `autoresearch` | `src/autoresearch_wrapper.py` — enhance with stratified sampling |
-| Agent B | New Python + MCP SDK | `src/multi_agent_orchestrator.py` — already coordinates all agents |
-| Agent C | New Python + MCP SDK | New `src/agents/executor_agent.py` — added to our existing agents |
-| MCP Server (inter-agent) | `modelcontextprotocol/python-sdk` | Our `MultiAgentOrchestrator` + FastAPI (`backend/api.py`) handle coordination — no extra SDK needed |
-| MCP Server (file parsing) | — | `src/mcp_server.py` — already parses `.ipynb`/`.py`/`.docx`/`.json` |
-| Frontend | New Streamlit / Gradio / React | `frontend/app.py` — add a **Trace Log** tab to the existing Streamlit app |
-| Database | SQLite / PostgreSQL / MLflow | `src/database.py` — `LocalDatabase` (SQLite) + `CloudDatabase` (Supabase) — add `traces` table |
-| Message Queue | Redis / RabbitMQ | **Not needed** — DB-backed trace log + FastAPI endpoint is sufficient |
-| LLM | Any | Anthropic `claude-3-5-haiku` via LangChain (already wired) |
-| Hosting | Any VM | GCP Cloud Run — already deployed |
-| Containers | New Dockerfiles | `Dockerfile.backend` + `Dockerfile.frontend` — already exist |
-| CI/CD | Manual | `cloudbuild.yaml` — auto-deploys on `git push` |
-| Experiment tracking | MLflow | Our `ledger` table in SQLite/Supabase — already tracks everything |
-
----
-
-## 3. What Needs to Be Built
-
-Only **three additions** on top of what exists:
-
-### 3.1 — Enhance `src/autoresearch_wrapper.py` (Agent A)
-Add stratified sampling support:
-
-```python
-def run_autoresearch(
-    self,
-    ...
-    stratify: bool = True,
-    max_sample_rows: int = 10_000,
-) -> Dict:
-```
-
-- Accepts `X_train`, `y_train` directly (or loads from ledger entry)
-- If `stratify=True` and dataset > `max_sample_rows`, uses `sklearn.model_selection.train_test_split` with `stratify=y`
-- Logs each iteration to the new `traces` table (see 3.3)
-- Stopping condition: N iterations OR metric improvement plateau (configurable)
-- Output: same existing dict shape `{status, best_model, simulated, ...}` — no breaking changes
-
----
-
-### 3.2 — New `src/agents/executor_agent.py` (Agent C)
-Receives the best model/params from Agent B (orchestrator) and:
-
-1. Generates a new `.ipynb` notebook using `nbformat` (already in requirements) with the optimised hyperparameters pre-filled
-2. Stores the generated notebook path + params in a new ledger entry via `src/mcp_server.py`
-3. Logs a trace entry (experiment complete)
-
-```python
-class ExecutorAgent(BaseAgent):
-    def execute(self, best_model: dict, source_entry_id: int, goal: str) -> dict:
-        """Generate notebook + log result to ledger."""
-        notebook = self._generate_notebook(best_model)
-        entry_id = self._store_in_ledger(notebook, best_model, source_entry_id)
-        self._log_trace("executor", f"Generated notebook for {best_model['name']}", entry_id)
-        return {"status": "ok", "notebook_path": notebook, "entry_id": entry_id}
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│   User clicks "Run Pipeline" in Agent Plan tab                     │
+│                                                                     │
+│        ┌──────────────────────────────────────────────┐            │
+│        │  Agent A — AutoResearcher                    │            │
+│        │  src/autoresearch_wrapper.py                 │            │
+│        │                                              │            │
+│        │  1. Stratified-sample the dataset            │            │
+│        │  2. Loop: try model variants                 │            │
+│        │  3. Keep best metric result                  │            │
+│        │  4. Log each iteration → traces table        │            │
+│        └──────────────────┬───────────────────────────┘            │
+│                           │  best_model + params                   │
+│        ┌──────────────────▼───────────────────────────┐            │
+│        │  Agent B — Orchestrator                      │            │
+│        │  src/multi_agent_orchestrator.py             │            │
+│        │                                              │            │
+│        │  1. Receives Agent A result                  │            │
+│        │  2. Runs Lead Scientist, EDA, DNN,           │            │
+│        │     Cost Estimator, LLM Judge (existing)     │            │
+│        │  3. Validates plan, scores 0–100             │            │
+│        │  4. Forwards to Agent C                      │            │
+│        └──────────────────┬───────────────────────────┘            │
+│                           │  validated plan + best params          │
+│        ┌──────────────────▼───────────────────────────┐            │
+│        │  Agent C — Executor                          │            │
+│        │  src/agents/executor_agent.py  ← NEW         │            │
+│        │                                              │            │
+│        │  1. Generates optimised .ipynb notebook      │            │
+│        │  2. Creates a new ledger entry               │            │
+│        │  3. Logs completion trace                    │            │
+│        └──────────────────────────────────────────────┘            │
+│                                                                     │
+│   Streamlit Trace Log tab shows the full run live                  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### 3.3 — Add `traces` Table to `src/database.py`
+## Agents
 
-```sql
-CREATE TABLE IF NOT EXISTS traces (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id      TEXT NOT NULL,          -- groups all traces from one pipeline run
-    agent       TEXT NOT NULL,          -- 'autoresearcher' | 'orchestrator' | 'executor'
-    message     TEXT NOT NULL,
-    payload     TEXT DEFAULT NULL,      -- JSON: best_model, metric, params, etc.
-    entry_id    INTEGER REFERENCES ledger(id) ON DELETE SET NULL,
-    timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+### Agent A — AutoResearcher
+**File:** `src/autoresearch_wrapper.py` (existing, enhanced)
+
+**Responsibility:** Search for the best model and hyperparameters on a stratified sample of the dataset.
+
+**Input:**
+```json
+{
+  "file_path": "notebooks/experiment.ipynb",
+  "goal": "Maximise F1 on imbalanced classes",
+  "max_sample_rows": 10000,
+  "stratify": true,
+  "max_iterations": 50,
+  "plateau_stop": 10
+}
 ```
 
-New methods on `LocalDatabase` and `CloudDatabase`:
-- `log_trace(run_id, agent, message, payload=None, entry_id=None)`
-- `get_traces(run_id=None, limit=200)`
+**New behaviour:**
+- If the dataset has more than `max_sample_rows` rows, use `sklearn.model_selection.train_test_split` with `stratify=y` to create a representative subset before searching
+- Log one trace entry per iteration (model tried, metric achieved, whether it is a new best)
+- Stop on the first of: max iterations reached, wall time exceeded (5 min), or metric plateau for N consecutive iterations
 
----
-
-### 3.4 — Trace Log Tab in `frontend/app.py`
-
-Add a **🔍 Trace Log** tab between Costs and Notebook Snippet:
-
-```
-tab_upload | tab_ledger | tab_tree | tab_plan | tab_costs | tab_traces | tab_snippet
-```
-
-Displays a live feed of all agent messages for the latest (or selected) pipeline run:
-
-```
-🔍 Trace Log
-
-Run ID: [selectbox — latest runs]   [🔄 Refresh]
-
-2026-04-23 22:01:00  autoresearcher   Sampling 10,000 rows (stratified) from 1.3M
-2026-04-23 22:01:05  autoresearcher   Iteration 1/50 — XGBClassifier acc=0.841
-2026-04-23 22:01:12  autoresearcher   Iteration 7/50 — LightGBM acc=0.879 ✅ new best
-2026-04-23 22:01:45  orchestrator     Agent A complete. Best: LightGBM acc=0.879
-2026-04-23 22:01:46  orchestrator     Forwarding to Executor...
-2026-04-23 22:01:47  executor         Generated notebook: lgbm_optimised.ipynb
-2026-04-23 22:01:48  executor         Ledger entry #12 created
+**Output (unchanged shape):**
+```json
+{
+  "status": "success",
+  "best_model": {
+    "name": "LightGBMClassifier",
+    "family": "Boosting",
+    "params": { "n_estimators": 300, "learning_rate": 0.05 },
+    "metrics": { "f1": 0.879, "accuracy": 0.912 }
+  },
+  "simulated": false,
+  "iterations_run": 23
+}
 ```
 
 ---
 
-## 4. Updated Agent Roles
+### Agent B — Orchestrator
+**File:** `src/multi_agent_orchestrator.py` (existing, extended)
 
-### Agent A — AutoResearcher (`src/autoresearch_wrapper.py`)
-- **Input:** file path (from ledger) + goal + sampling config
-- **Does:** stratified sample → AutoML loop → finds best model
-- **Logs:** one trace per iteration to `traces` table
-- **Output:** `{best_model, best_metric, params, simulated}`
+**Responsibility:** Receive Agent A's result, run the existing five-agent validation pipeline, then hand off to Agent C.
 
-### Agent B — Orchestrator (`src/multi_agent_orchestrator.py`)
-- **Input:** Agent A result + original ledger state
-- **Does:** already runs Lead Scientist, EDA, DNN, Cost Estimator, LLM Judge — **now also calls Agent C**
-- **Logs:** orchestration decision traces
-- **Output:** full plan dict + executor result
+**What already exists (unchanged):**
+- Lead Scientist → proposes next steps
+- EDA Agent → preprocessing suggestions
+- DNN Agent → uncertainty methods
+- Cost Estimator → resource estimate
+- LLM Judge → scores the plan 0–100
 
-### Agent C — Executor (`src/agents/executor_agent.py`) ← **new**
-- **Input:** best_model dict from Agent B
-- **Does:** generates `.ipynb` with `nbformat`, stores in ledger, logs trace
-- **Output:** `{notebook_path, entry_id}`
+**New addition:**
+- After autoresearch completes with `status == "success"`, call `ExecutorAgent.execute()`
+- Log an orchestration trace entry at handoff
 
 ---
 
-## 5. New API Endpoint
+### Agent C — Executor
+**File:** `src/agents/executor_agent.py` ← **new file**
 
-Add to `backend/api.py`:
+**Responsibility:** Take the validated best model and generate a ready-to-run optimised notebook, then register it in the ledger.
 
-```python
-@app.get("/traces")
-def get_traces(run_id: Optional[str] = None, limit: int = 200):
-    db, _, _, _ = get_services()
-    return {"traces": db.get_traces(run_id=run_id, limit=limit)}
+**Steps:**
+1. Load the source notebook (identified by `file_path` from the ledger entry) using `nbformat`
+2. Inject a new code cell at the end with the optimised hyperparameters pre-filled
+3. Add a logging cell (same format as the Notebook Snippet tab) so the result auto-logs when run
+4. Save as `{original_name}_optimised_{run_id}.ipynb`
+5. Call `MCPServer.store_in_db()` to create a new ledger entry for the generated notebook
+6. Log a completion trace
+
+**Output:**
+```json
+{
+  "status": "ok",
+  "notebook_path": "experiment_optimised_a1b2c3.ipynb",
+  "entry_id": 14,
+  "injected_params": { "n_estimators": 300, "learning_rate": 0.05 }
+}
 ```
 
 ---
 
-## 6. Updated Orchestrator Flow
+## New Database Table — `traces`
 
-```python
-# In MultiAgentOrchestrator.run_pipeline():
-
-# Existing steps 1–7 unchanged ...
-
-# NEW step 8: Executor
-if execute_autoresearch and autoresearch_result.get("status") == "success":
-    executor = ExecutorAgent(self._get_rag(), self.llm)
-    executor_result = executor.execute(
-        best_model=autoresearch_result["best_model"],
-        source_entry_id=ledger_state.get("entry_id"),
-        goal=goal,
-    )
-    result["executor_result"] = executor_result
-```
-
----
-
-## 7. Database Schema Addition (Supabase)
-
-Add to `supabase_setup.sql` and run in SQL editor:
+Added to `src/database.py` and `supabase_setup.sql`.
 
 ```sql
 CREATE TABLE IF NOT EXISTS traces (
@@ -201,50 +163,119 @@ CREATE TABLE IF NOT EXISTS traces (
     entry_id    INTEGER REFERENCES ledger(id) ON DELETE SET NULL,
     timestamp   TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_traces_run_id   ON traces(run_id);
-CREATE INDEX IF NOT EXISTS idx_traces_timestamp ON traces(timestamp DESC);
 ```
 
----
+| Column | Purpose |
+|--------|---------|
+| `run_id` | Groups all traces from a single pipeline run (UUID generated at start) |
+| `agent` | `autoresearcher` · `orchestrator` · `executor` |
+| `message` | Human-readable description of what happened |
+| `payload` | JSON: model tried, metric, params, entry_id, etc. |
+| `entry_id` | Links the trace to a specific ledger entry (optional) |
 
-## 8. Stopping Condition for Agent A
-
-| Condition | Default |
-|-----------|---------|
-| Max iterations | 50 |
-| Max wall time | 5 minutes |
-| Plateau (no improvement for N iterations) | 10 iterations |
-| Early stop if metric > threshold | configurable per goal |
-
-The first condition to trigger wins. The best result at stop time is passed to Agent B.
-
----
-
-## 9. What We Are NOT Building
-
-| Mistral Suggested | Why We Skip It |
-|-------------------|----------------|
-| `modelcontextprotocol/python-sdk` | Our FastAPI + orchestrator already handle inter-agent comms |
-| Redis / RabbitMQ message queue | Overkill — DB-backed trace log is sufficient |
-| MLflow | Our ledger already tracks experiments with full metadata |
-| Separate Streamlit frontend for traces | Add a tab to the existing app instead |
-| Separate Docker container per agent | One backend container already runs all agents |
-| Gradio / React | We already have Streamlit |
+**New methods on `LocalDatabase` and `CloudDatabase`:**
+- `log_trace(run_id, agent, message, payload=None, entry_id=None)`
+- `get_traces(run_id=None, limit=200)`
 
 ---
 
-## 10. Implementation Order
+## New API Endpoint
 
-1. `src/database.py` — add `traces` table migration + `log_trace()` / `get_traces()`
-2. `src/autoresearch_wrapper.py` — add stratified sampling + trace logging per iteration
-3. `src/agents/executor_agent.py` — new Agent C
-4. `src/multi_agent_orchestrator.py` — wire in Agent C after autoresearch
-5. `backend/api.py` — add `GET /traces` endpoint
-6. `frontend/app.py` — add Trace Log tab
-7. `supabase_setup.sql` — add traces table (+ manual `ALTER TABLE` for existing DB)
-8. `cloudbuild.yaml` — nothing to change (auto-deploys on push)
+Added to `backend/api.py`:
+
+```
+GET /traces?run_id=<uuid>&limit=200
+```
+
+Returns the trace log for a given run (or all recent traces if no `run_id`).
 
 ---
 
-*All new code builds directly on top of the existing Agentic DS Ledger v2.1 codebase.*
-*No new infrastructure, no new frameworks, no new hosting.*
+## New Frontend Tab — Trace Log
+
+Added to `frontend/app.py` between Costs and Notebook Snippet:
+
+```
+📂 Upload Files  |  📜 Ledger  |  🌳 Experiment Tree  |  🤖 Agent Plan  |  💰 Costs  |  🔍 Trace Log  |  📋 Notebook Snippet
+```
+
+**UI:**
+```
+🔍 Trace Log
+
+Latest Run ▼   [🔄 Refresh]
+
+  22:01:00  🔬 autoresearcher   Sampling 10,000 rows (stratified) from 1.3M dataset
+  22:01:05  🔬 autoresearcher   Iteration  1/50 — RandomForest    acc=0.841
+  22:01:09  🔬 autoresearcher   Iteration  4/50 — XGBClassifier   acc=0.863  ✅ new best
+  22:01:18  🔬 autoresearcher   Iteration  7/50 — LightGBM        acc=0.879  ✅ new best
+  22:01:44  🔬 autoresearcher   Plateau reached after 10 iterations. Stopping.
+  22:01:45  🧠 orchestrator     Agent A complete → LightGBM acc=0.879. Running plan validation...
+  22:01:52  🧠 orchestrator     LLM Judge score: 94/100 APPROVED. Forwarding to Executor.
+  22:01:53  ⚙️  executor         Generating optimised notebook from experiment.ipynb...
+  22:01:54  ⚙️  executor         Notebook saved: experiment_optimised_a1b2c3.ipynb
+  22:01:54  ⚙️  executor         Ledger entry #14 created.
+```
+
+Each row is one `traces` table entry. The tab auto-refreshes with a `st.rerun()` button and shows the run selector dropdown.
+
+---
+
+## Stopping Conditions for Agent A
+
+| Condition | Default | Configurable |
+|-----------|---------|--------------|
+| Max iterations | 50 | Yes |
+| Max wall time | 5 minutes | Yes |
+| Metric plateau (no improvement for N iterations) | 10 | Yes |
+| Metric threshold reached (e.g. acc > 0.95) | None | Yes |
+
+The first condition to trigger wins. The best result found up to that point is passed to Agent B.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/database.py` | Add `traces` table migration, `log_trace()`, `get_traces()` |
+| `src/autoresearch_wrapper.py` | Add stratified sampling + per-iteration trace logging |
+| `src/agents/executor_agent.py` | **New** — Agent C |
+| `src/agents/__init__.py` | Export `ExecutorAgent` |
+| `src/multi_agent_orchestrator.py` | Wire in `ExecutorAgent` after autoresearch |
+| `backend/api.py` | Add `GET /traces` endpoint |
+| `frontend/app.py` | Add `tab_traces` — Trace Log tab |
+| `supabase_setup.sql` | Add `traces` table + index |
+
+**Nothing else changes.** No new Docker images, no new Cloud Run services, no new dependencies beyond what is already in `requirements.txt`.
+
+---
+
+## Implementation Order
+
+1. `src/database.py` — traces table + methods
+2. `src/autoresearch_wrapper.py` — stratified sampling + trace logging
+3. `src/agents/executor_agent.py` — Agent C
+4. `src/multi_agent_orchestrator.py` — wire Agent C in
+5. `backend/api.py` — `/traces` endpoint
+6. `frontend/app.py` — Trace Log tab
+7. `supabase_setup.sql` — schema update
+8. Push → Cloud Build auto-deploys both services
+
+---
+
+## What We Are Not Building
+
+| Idea | Reason Skipped |
+|------|----------------|
+| `modelcontextprotocol/python-sdk` | Our FastAPI + orchestrator already handle inter-agent communication |
+| Redis / RabbitMQ | The `traces` DB table + polling is sufficient at this scale |
+| MLflow | Our `ledger` table already tracks every experiment with full metadata |
+| Separate Docker container per agent | One backend container runs all agents — no benefit to splitting |
+| React frontend | Streamlit already serves the UI and is already deployed |
+| Gradio | Same — already have Streamlit |
+
+---
+
+*Built on top of Agentic DS Ledger v2.1*
+*Repo: https://github.com/dehiska/agentic-data-science-ledger*
