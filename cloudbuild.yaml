@@ -79,16 +79,26 @@ steps:
       - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_ANTHROPIC_API_KEY}
 
   # ── 6. Get backend URL and deploy frontend ───────────────────────────────────
+  # Write URL to file first — avoids $VAR substitution validation in Cloud Build
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: deploy-frontend
-    waitFor: [push-frontend, deploy-backend]
+    id: get-backend-url
+    waitFor: [deploy-backend]
     entrypoint: bash
     args:
       - -c
       - |
-        BACKEND_URL=$(gcloud run services describe agentic-ledger-backend \
-          --region=${_REGION} --format='value(status.url)')
-        echo "Backend URL: $BACKEND_URL"
+        gcloud run services describe agentic-ledger-backend \
+          --region=${_REGION} --format='value(status.url)' \
+          > /workspace/backend_url.txt
+        echo "Backend URL: $(cat /workspace/backend_url.txt)"
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-frontend
+    waitFor: [push-frontend, get-backend-url]
+    entrypoint: bash
+    args:
+      - -c
+      - |
         gcloud run deploy agentic-ledger-frontend \
           --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend:$COMMIT_SHA \
           --region=${_REGION} \
@@ -98,10 +108,7 @@ steps:
           --cpu=1 \
           --min-instances=0 \
           --max-instances=3 \
-          --set-env-vars="APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY}"
-        gcloud run services update agentic-ledger-frontend \
-          --region=${_REGION} \
-          --update-env-vars="BACKEND_URL=$BACKEND_URL"
+          --set-env-vars="APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},BACKEND_URL=$(cat /workspace/backend_url.txt)"
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$COMMIT_SHA
