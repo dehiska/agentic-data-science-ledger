@@ -290,12 +290,13 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_upload, tab_ledger, tab_tree, tab_plan, tab_costs, tab_snippet = st.tabs([
+tab_upload, tab_ledger, tab_tree, tab_plan, tab_costs, tab_traces, tab_snippet = st.tabs([
     "📂 Upload Files",
     "📜 Ledger",
     "🌳 Experiment Tree",
     "🤖 Agent Plan",
     "💰 Costs",
+    "🔍 Trace Log",
     "📋 Notebook Snippet",
 ])
 
@@ -924,8 +925,18 @@ with tab_plan:
                             col.metric(k.upper(), f"{v:.4f}")
                     if autoresearch.get("simulated"):
                         st.caption("Simulated — install autoresearch for real AutoML")
+                    if autoresearch.get("run_id"):
+                        st.caption(f"Run ID: `{autoresearch['run_id']}` — see **🔍 Trace Log** tab for full iteration history")
                 else:
                     st.error(f"Failed: {autoresearch.get('error', '?')}")
+
+            if result.get("executor_result"):
+                er = result["executor_result"]
+                st.subheader("⚙️ Executor Result")
+                st.success(
+                    f"Optimised notebook **`{er.get('notebook_path')}`** generated"
+                    + (f" → Ledger entry **#{er.get('entry_id')}**" if er.get("entry_id") else "")
+                )
 
             st.divider()
 
@@ -1033,7 +1044,93 @@ with tab_costs:
         display_df["Type"] = display_df["Type"].replace({"agent_plan": "🤖 Agent Plan", "autoresearch": "⚡ Autoresearch"})
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-# ── Tab 5: Notebook Snippet ────────────────────────────────────────────────────
+# ── Tab 6: Trace Log ──────────────────────────────────────────────────────────
+
+with tab_traces:
+    st.header("🔍 Trace Log")
+    st.caption("Live feed of every agent action from the autoresearch pipeline.")
+
+    if APP_MODE == "cloud":
+        data = api("GET", "/traces")
+        all_traces = data.get("traces", []) if data else []
+        run_ids = data.get("run_ids", []) if data else []
+    else:
+        all_traces = get_db_direct().get_traces(limit=500)
+        run_ids = get_db_direct().get_trace_run_ids()
+
+    hdr_col, btn_col = st.columns([4, 1])
+    with btn_col:
+        if st.button("🔄 Refresh", key="refresh_traces"):
+            st.rerun()
+
+    if not all_traces:
+        st.info(
+            "No traces yet.\n\n"
+            "Go to the **🤖 Agent Plan** tab, toggle **⚡ Execute autoresearch** ON, "
+            "then click **🚀 Generate Plan** to start the pipeline."
+        )
+    else:
+        with hdr_col:
+            run_options = ["All runs"] + run_ids
+            selected_run = st.selectbox("Run", run_options, key="trace_run_select")
+
+        filtered = (
+            all_traces if selected_run == "All runs"
+            else [t for t in all_traces if t.get("run_id") == selected_run]
+        )
+        # When viewing all runs, show newest first; for a specific run show oldest first
+        if selected_run != "All runs":
+            filtered = sorted(filtered, key=lambda x: x.get("timestamp", ""))
+
+        AGENT_ICONS = {
+            "autoresearcher": "🔬",
+            "orchestrator": "🧠",
+            "executor": "⚙️",
+        }
+
+        st.caption(f"{len(filtered)} trace entries")
+        for t in filtered:
+            icon = AGENT_ICONS.get(t.get("agent", ""), "•")
+            ts = str(t.get("timestamp", ""))[:19]
+            agent = t.get("agent", "?")
+            msg = t.get("message", "")
+            # Highlight "new best" entries
+            if "new best" in msg:
+                st.markdown(
+                    f"`{ts}` &nbsp; {icon} **{agent}** &nbsp; 🟢 {msg}",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"`{ts}` &nbsp; {icon} **{agent}** &nbsp; {msg}",
+                    unsafe_allow_html=True,
+                )
+
+        # Download button for generated notebooks
+        executor_traces = [
+            t for t in filtered
+            if t.get("agent") == "executor" and isinstance(t.get("payload"), dict)
+            and t["payload"].get("notebook")
+        ]
+        if executor_traces:
+            st.divider()
+            st.subheader("📥 Generated Notebooks")
+            for t in executor_traces:
+                nb_path = t["payload"]["notebook"]
+                if Path(nb_path).exists():
+                    with open(nb_path, "rb") as f:
+                        st.download_button(
+                            f"📥 Download `{nb_path}`",
+                            data=f.read(),
+                            file_name=nb_path,
+                            mime="application/json",
+                            key=f"dl_nb_{t.get('id', nb_path)}",
+                        )
+                else:
+                    st.caption(f"`{nb_path}` — not available for download in cloud mode")
+
+
+# ── Tab 7: Notebook Snippet ────────────────────────────────────────────────────
 
 with tab_snippet:
     st.header("📋 Notebook Logging Cell")

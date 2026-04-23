@@ -377,6 +377,19 @@ def get_costs():
     return {"costs": db.get_costs()}
 
 
+# ── Traces ─────────────────────────────────────────────────────────────────────
+
+@app.get("/traces")
+def get_traces(
+    run_id: Optional[str] = None,
+    limit: int = Query(200, le=1000),
+):
+    db, _, _, _ = get_services()
+    traces = db.get_traces(run_id=run_id, limit=limit)
+    run_ids = db.get_trace_run_ids()
+    return {"traces": traces, "count": len(traces), "run_ids": run_ids}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("backend.api:app", host="0.0.0.0", port=8080, reload=True)

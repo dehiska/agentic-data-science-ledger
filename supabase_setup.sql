@@ -78,6 +78,20 @@ CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp DESC);
 -- ALTER TABLE costs ADD COLUMN IF NOT EXISTS cost_type TEXT DEFAULT 'autoresearch';
 -- ALTER TABLE costs ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
 
+-- ── Traces table (v3.0) ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS traces (
+    id          SERIAL PRIMARY KEY,
+    run_id      TEXT NOT NULL,
+    agent       TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    payload     JSONB DEFAULT NULL,
+    entry_id    INTEGER REFERENCES ledger(id) ON DELETE SET NULL,
+    timestamp   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_traces_run_id    ON traces(run_id);
+CREATE INDEX IF NOT EXISTS idx_traces_timestamp ON traces(timestamp DESC);
+
 -- ── Row Level Security (optional, recommended for multi-user) ─────────────────
 -- Uncomment to restrict reads to authenticated users only:
 -- ALTER TABLE projects       ENABLE ROW LEVEL SECURITY;

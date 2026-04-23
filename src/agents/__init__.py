@@ -4,6 +4,7 @@ from .eda_agent import EDAAgent
 from .dnn_agent import DNNAgent
 from .cost_estimator import CostEstimatorAgent
 from .llm_judge import LLMJudge
+from .executor_agent import ExecutorAgent
 
 __all__ = [
     "BaseAgent",
@@ -12,4 +13,5 @@ __all__ = [
     "DNNAgent",
     "CostEstimatorAgent",
     "LLMJudge",
+    "ExecutorAgent",
 ]

@@ -51,6 +51,16 @@ class LocalDatabase:
             cost         REAL,
             timestamp    DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS traces (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id       TEXT NOT NULL,
+            agent        TEXT NOT NULL,
+            message      TEXT NOT NULL,
+            payload      TEXT DEFAULT NULL,
+            entry_id     INTEGER REFERENCES ledger(id) ON DELETE SET NULL,
+            timestamp    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         self.conn.commit()
         self._migrate()
@@ -286,6 +296,55 @@ class LocalDatabase:
         columns = [col[0] for col in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    # ── Traces ─────────────────────────────────────────────────────────────────
+
+    def log_trace(
+        self,
+        run_id: str,
+        agent: str,
+        message: str,
+        payload: Optional[Dict] = None,
+        entry_id: Optional[int] = None,
+    ):
+        self.conn.execute(
+            "INSERT INTO traces (run_id, agent, message, payload, entry_id) VALUES (?, ?, ?, ?, ?)",
+            (run_id, agent, message, json.dumps(payload) if payload else None, entry_id),
+        )
+        self.conn.commit()
+
+    def get_traces(self, run_id: Optional[str] = None, limit: int = 200) -> List[Dict]:
+        cursor = self.conn.cursor()
+        if run_id:
+            cursor.execute(
+                "SELECT * FROM traces WHERE run_id = ? ORDER BY timestamp ASC LIMIT ?",
+                (run_id, limit),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM traces ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            )
+        columns = [col[0] for col in cursor.description]
+        rows = []
+        for row in cursor.fetchall():
+            entry = dict(zip(columns, row))
+            if entry.get("payload"):
+                try:
+                    entry["payload"] = json.loads(entry["payload"])
+                except Exception:
+                    pass
+            rows.append(entry)
+        return rows
+
+    def get_trace_run_ids(self) -> List[str]:
+        """Return distinct run_ids ordered by most recent first."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT run_id, MAX(timestamp) as ts FROM traces "
+            "GROUP BY run_id ORDER BY ts DESC LIMIT 50"
+        )
+        return [row[0] for row in cursor.fetchall()]
+
     def close(self):
         self.conn.close()
 
@@ -434,6 +493,50 @@ class CloudDatabase:
 
     def get_costs(self) -> List[Dict]:
         return self.db.table("costs").select("*").order("timestamp", desc=True).execute().data
+
+    # ── Traces ─────────────────────────────────────────────────────────────────
+
+    def log_trace(
+        self,
+        run_id: str,
+        agent: str,
+        message: str,
+        payload: Optional[Dict] = None,
+        entry_id: Optional[int] = None,
+    ):
+        self.db.table("traces").insert({
+            "run_id": run_id,
+            "agent": agent,
+            "message": message,
+            "payload": payload,
+            "entry_id": entry_id,
+        }).execute()
+
+    def get_traces(self, run_id: Optional[str] = None, limit: int = 200) -> List[Dict]:
+        q = (
+            self.db.table("traces")
+            .select("*")
+            .order("timestamp", desc=False)
+            .limit(limit)
+        )
+        if run_id:
+            q = q.eq("run_id", run_id)
+        return q.execute().data
+
+    def get_trace_run_ids(self) -> List[str]:
+        r = (
+            self.db.table("traces")
+            .select("run_id, timestamp")
+            .order("timestamp", desc=True)
+            .limit(500)
+            .execute()
+        )
+        seen, result = set(), []
+        for row in r.data:
+            if row["run_id"] not in seen:
+                seen.add(row["run_id"])
+                result.append(row["run_id"])
+        return result[:50]
 
 
 # ── Factory ────────────────────────────────────────────────────────────────────

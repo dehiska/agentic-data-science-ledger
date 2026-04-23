@@ -26,6 +26,7 @@ from src.agents import (
     DNNAgent,
     CostEstimatorAgent,
     LLMJudge,
+    ExecutorAgent,
 )
 
 
@@ -53,6 +54,7 @@ class MultiAgentOrchestrator:
         self.dnn_agent = DNNAgent(self._get_rag(), self.llm)
         self.cost_estimator = CostEstimatorAgent(self._get_rag(), self.llm)
         self.judge = LLMJudge(self._get_rag(), self.llm)
+        self.executor = ExecutorAgent(self._get_rag(), self.llm, db)
 
         # Phase 2
         self._github_token = github_token
@@ -97,9 +99,9 @@ class MultiAgentOrchestrator:
 
         # 7. Optional autoresearch (Phase 2)
         autoresearch_result = None
-        if execute_autoresearch and repo_name:
+        if execute_autoresearch:
             autoresearch_result = self._run_autoresearch(
-                repo_name=repo_name,
+                repo_name=repo_name or "",
                 file_path=file_path,
                 branch=branch,
                 goal=goal,
@@ -108,11 +110,33 @@ class MultiAgentOrchestrator:
                 ledger_state=ledger_state,
             )
 
+        # 8. Executor — generate optimised notebook if autoresearch succeeded
+        executor_result = None
+        if autoresearch_result and autoresearch_result.get("status") == "success":
+            if self.db:
+                self.db.log_trace(
+                    autoresearch_result.get("run_id", "unknown"),
+                    "orchestrator",
+                    f"Agent A complete → best: {autoresearch_result['best_model'].get('name')} "
+                    f"f1={autoresearch_result['best_model'].get('metrics', {}).get('f1', '?')}. "
+                    f"LLM Judge: {validation.get('score', '?')}/100 {validation.get('verdict', '')}. "
+                    f"Forwarding to Executor...",
+                    payload={"best_model": autoresearch_result["best_model"].get("name"),
+                             "judge_score": validation.get("score")},
+                )
+            executor_result = self.executor.execute(
+                best_model=autoresearch_result["best_model"],
+                source_file=file_path,
+                run_id=autoresearch_result.get("run_id"),
+                goal=goal,
+            )
+
         return {
             "plan": plan,
             "validation": validation,
             "ledger_state": ledger_state,
             "autoresearch_result": autoresearch_result,
+            "executor_result": executor_result,
         }
 
     # ── Helpers ────────────────────────────────────────────────────────────────
@@ -160,6 +184,8 @@ class MultiAgentOrchestrator:
         plan: Dict,
         ledger_state: Dict,
     ) -> Dict:
+        import uuid as _uuid
+        run_id = _uuid.uuid4().hex[:8]
         try:
             from src.autoresearch_wrapper import AutoResearchWrapper
             wrapper = AutoResearchWrapper(self.db, self._github_token)
@@ -170,6 +196,7 @@ class MultiAgentOrchestrator:
                 goal=goal,
                 team_member=team_member,
                 execute=True,
+                run_id=run_id,
             )
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            return {"status": "error", "error": str(e), "run_id": run_id}
