@@ -1,5 +1,5 @@
 # Agentic DS Ledger — Three-Agent Autoresearch Pipeline
-### Spec v1.0 · April 2026
+### Spec v1.1 · April 2026
 **Repo:** https://github.com/dehiska/agentic-data-science-ledger
 
 ---
@@ -218,6 +218,17 @@ Latest Run ▼   [🔄 Refresh]
 ```
 
 Each row is one `traces` table entry. The tab auto-refreshes with a `st.rerun()` button and shows the run selector dropdown.
+
+---
+
+## Known Gaps & Decisions
+
+| Gap | Risk | Decision |
+|-----|------|----------|
+| **Data loading** | How is the dataset loaded from the notebook? | Use `nbformat` to extract data-loading cells from the source notebook and reuse the same logic in `autoresearch_wrapper.py`. Agent A re-executes those cells to get `X_train` / `y_train` before sampling. |
+| **Non-tabular data** | What if the notebook uses images or text? | **Skip** — the pipeline only runs on tabular datasets. Agent A checks for a DataFrame shape; if not found, it exits gracefully with `status: "skipped"` and logs a trace. |
+| **Model serialization** | How is `best_model` passed from Agent A to Agent B? | Use JSON only — no file serialization. Hyperparameters, metric values, and model name are all JSON-serializable. If the user later wants to download the trained model object, a **Download Model** button is added to the Trace Log tab that serializes on demand (`joblib` for scikit-learn, `torch.save` for PyTorch). Otherwise the pipeline stays lightweight and stateless. |
+| **Parallelization** | Slow for large hyperparameter spaces. | **Future improvement** — use `joblib.Parallel` or Ray Tune for parallel trials. Not in v1. |
 
 ---
 
