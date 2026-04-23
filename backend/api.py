@@ -390,7 +390,67 @@ def get_costs():
     return {"costs": db.get_costs()}
 
 
-# ── Swarm AutoML ───────────────────────────────────────────────────────────────
+# ── Swarm AutoML — CSV upload to GCS + run ─────────────────────────────────────
+
+@app.post("/swarm/upload-csv")
+async def upload_swarm_csv(file: UploadFile = File(...)):
+    """
+    Upload a CSV dataset to GCS (cloud mode) or save locally (local mode).
+    Returns the path/URI to pass to POST /swarm/run as csv_path.
+    """
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "Only .csv files are accepted.")
+
+    content = await file.read()
+    app_mode = os.getenv("APP_MODE", "local")
+
+    if app_mode == "cloud":
+        # ── Cloud: stream directly to GCS ─────────────────────────────────────
+        from src.gcs_storage import upload_bytes, GCS_BUCKET
+        if not GCS_BUCKET:
+            raise HTTPException(500, "GCS_BUCKET env var is not set on the backend.")
+        gcs_uri = upload_bytes(content, file.filename)
+        return {
+            "status": "ok",
+            "csv_path": gcs_uri,
+            "filename": file.filename,
+            "size_mb": round(len(content) / 1e6, 2),
+            "storage": "gcs",
+        }
+    else:
+        # ── Local: save to ./swarm_datasets/ ──────────────────────────────────
+        import tempfile
+        save_dir = Path("swarm_datasets")
+        save_dir.mkdir(exist_ok=True)
+        dest = save_dir / file.filename
+        dest.write_bytes(content)
+        return {
+            "status": "ok",
+            "csv_path": str(dest.resolve()),
+            "filename": file.filename,
+            "size_mb": round(len(content) / 1e6, 2),
+            "storage": "local",
+        }
+
+
+@app.get("/swarm/datasets")
+def list_swarm_datasets():
+    """List CSV datasets available in GCS (cloud) or local swarm_datasets/ folder."""
+    app_mode = os.getenv("APP_MODE", "local")
+    if app_mode == "cloud":
+        from src.gcs_storage import list_datasets
+        return {"datasets": list_datasets(), "storage": "gcs"}
+    else:
+        save_dir = Path("swarm_datasets")
+        files = [
+            {"name": f.name, "gcs_uri": str(f.resolve()),
+             "size_mb": round(f.stat().st_size / 1e6, 2)}
+            for f in save_dir.glob("*.csv")
+        ] if save_dir.exists() else []
+        return {"datasets": files, "storage": "local"}
+
+
+# ── Swarm AutoML — run ─────────────────────────────────────────────────────────
 
 @app.post("/swarm/run")
 def run_swarm(req: SwarmRequest):

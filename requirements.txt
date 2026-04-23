@@ -42,3 +42,6 @@ google-cloud-bigquery>=3.20.0
 # ── AutoML (Swarm pipeline) ────────────────────────────────────────────────────
 flaml[automl]>=2.1.0
 pyarrow>=14.0.0
+
+# ── GCS (dataset storage for Swarm) ───────────────────────────────────────────
+google-cloud-storage>=2.16.0

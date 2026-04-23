@@ -13,6 +13,7 @@ substitutions:
   _REGION: us-central1
   _REPO: agentic-ledger
   _APP_MODE: cloud
+  _GCS_BUCKET: agentic-ledger-datasets  # will have $PROJECT_ID appended at deploy time
 
 steps:
   # ── 1. Build backend image ───────────────────────────────────────────────────
@@ -59,10 +60,26 @@ steps:
       - --all-tags
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/frontend
 
-  # ── 5. Deploy backend to Cloud Run ──────────────────────────────────────────
+  # ── 5. Create GCS bucket for swarm datasets (idempotent) ────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: create-gcs-bucket
+    waitFor: [push-backend]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gsutil mb -p $PROJECT_ID -l ${_REGION} gs://${_GCS_BUCKET}-$PROJECT_ID 2>/dev/null || true
+        echo "Bucket gs://${_GCS_BUCKET}-$PROJECT_ID ready."
+        # Grant the default Compute SA object admin on the bucket
+        PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+        gsutil iam ch \
+          serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com:roles/storage.objectAdmin \
+          gs://${_GCS_BUCKET}-$PROJECT_ID 2>/dev/null || true
+
+  # ── 6. Deploy backend to Cloud Run ──────────────────────────────────────────
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: deploy-backend
-    waitFor: [push-backend]
+    waitFor: [create-gcs-bucket]
     entrypoint: gcloud
     args:
       - run
@@ -76,9 +93,9 @@ steps:
       - --cpu=2
       - --min-instances=0
       - --max-instances=3
-      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_ANTHROPIC_API_KEY},MAX_ROWS_PER_AGENT=150000,TIME_BUDGET_PER_AGENT=60
+      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_ANTHROPIC_API_KEY},MAX_ROWS_PER_AGENT=150000,TIME_BUDGET_PER_AGENT=60,GCS_BUCKET=${_GCS_BUCKET}-$PROJECT_ID
 
-  # ── 6. Get backend URL and deploy frontend ───────────────────────────────────
+  # ── 7. Get backend URL and deploy frontend ───────────────────────────────────
   # Write URL to file first — avoids $VAR substitution validation in Cloud Build
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: get-backend-url

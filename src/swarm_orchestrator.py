@@ -275,10 +275,33 @@ class SwarmOrchestrator:
     # ── CSV loading ────────────────────────────────────────────────────────────
 
     def _load_csv(self, csv_path: str, run_id: str) -> pd.DataFrame:
-        """Load CSV with memory-efficient dtype downcasting."""
-        self._log(run_id, "swarm_orchestrator",
-                  f"Loading {Path(csv_path).name}…")
+        """
+        Load CSV with memory-efficient dtype downcasting.
+        Accepts either a local path or a gs:// GCS URI.
+        """
+        # ── Download from GCS if needed ────────────────────────────────────────
+        local_path = csv_path
+        _tmp_path: str | None = None
+        if csv_path.startswith("gs://"):
+            from src.gcs_storage import download_to_tmp
+            self._log(run_id, "swarm_orchestrator",
+                      f"Downloading from GCS: {csv_path}")
+            _tmp_path = download_to_tmp(csv_path)
+            local_path = _tmp_path
+            self._log(run_id, "swarm_orchestrator",
+                      f"Downloaded to {local_path}")
 
+        self._log(run_id, "swarm_orchestrator",
+                  f"Loading {Path(local_path).name}…")
+
+        try:
+            return self._read_csv_optimised(local_path, run_id)
+        finally:
+            if _tmp_path:
+                Path(_tmp_path).unlink(missing_ok=True)
+
+    def _read_csv_optimised(self, csv_path: str, run_id: str) -> pd.DataFrame:
+        """Internal: read a local CSV with dtype downcasting."""
         # Small sample pass to find downcast opportunities
         sample = pd.read_csv(csv_path, nrows=1000, low_memory=False)
         dtype_map: Dict = {}

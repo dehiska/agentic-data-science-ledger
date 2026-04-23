@@ -1137,26 +1137,91 @@ with tab_swarm:
         "aggregated by model family, and the global champion is stored in the ledger."
     )
 
-    st.info(
-        "**How to use:**\n\n"
-        "1. Enter the path to your training CSV (absolute or relative to the repo root)\n"
-        "2. Optionally point to an EDA notebook/script — the agent will auto-detect the "
-        "target column and task type from your code\n"
-        "3. Tune the swarm settings, then click **🚀 Launch Swarm**\n\n"
-        "Results stream into the **🔍 Trace Log** tab in real time.",
-        icon="💡",
-    )
+    if APP_MODE == "cloud":
+        st.info(
+            "**How to use (Cloud):**\n\n"
+            "1. Upload your training CSV — it will be stored in Google Cloud Storage\n"
+            "2. Optionally upload your EDA notebook — auto-detects target column & task type\n"
+            "3. Tune the swarm settings, then click **🚀 Launch Swarm**\n\n"
+            "Results stream into the **🔍 Trace Log** tab in real time.",
+            icon="💡",
+        )
+    else:
+        st.info(
+            "**How to use (Local):**\n\n"
+            "1. Enter the path to your training CSV\n"
+            "2. Optionally point to an EDA notebook/script\n"
+            "3. Tune the swarm settings, then click **🚀 Launch Swarm**\n\n"
+            "Results stream into the **🔍 Trace Log** tab in real time.",
+            icon="💡",
+        )
+
+    # ── CSV upload (cloud) / existing datasets picker ──────────────────────────
+    _resolved_csv_path = st.session_state.get("swarm_csv_path", "")
+
+    if APP_MODE == "cloud":
+        st.subheader("📤 Dataset")
+        up_col, pick_col = st.columns([2, 2])
+
+        with up_col:
+            csv_upload = st.file_uploader(
+                "Upload training CSV",
+                type=["csv"],
+                key="swarm_csv_uploader",
+                help="Uploaded to Google Cloud Storage — shared with all team members.",
+            )
+            if csv_upload and st.button("⬆️ Upload to GCS", key="btn_upload_csv"):
+                with st.spinner(f"Uploading {csv_upload.name} to GCS…"):
+                    up_result = api("POST", "/swarm/upload-csv",
+                                    files={"file": (csv_upload.name,
+                                                    csv_upload.getvalue(),
+                                                    "text/csv")})
+                if up_result and up_result.get("status") == "ok":
+                    st.session_state["swarm_csv_path"] = up_result["csv_path"]
+                    _resolved_csv_path = up_result["csv_path"]
+                    st.success(
+                        f"Uploaded ({up_result['size_mb']} MB) → "
+                        f"`{up_result['csv_path']}`"
+                    )
+                else:
+                    st.error("Upload failed.")
+
+        with pick_col:
+            datasets_resp = api("GET", "/swarm/datasets", silent=True)
+            datasets = (datasets_resp or {}).get("datasets", [])
+            if datasets:
+                ds_options = {f"{d['name']} ({d['size_mb']} MB)": d["gcs_uri"]
+                              for d in datasets}
+                ds_options = {"— select existing —": ""} | ds_options
+                picked = st.selectbox("Or pick existing dataset",
+                                      list(ds_options.keys()),
+                                      key="swarm_ds_pick")
+                if ds_options[picked]:
+                    _resolved_csv_path = ds_options[picked]
+                    st.session_state["swarm_csv_path"] = _resolved_csv_path
+
+        if _resolved_csv_path:
+            st.caption(f"Active dataset: `{_resolved_csv_path}`")
+        st.divider()
 
     # ── Config form ────────────────────────────────────────────────────────────
     with st.form("swarm_form"):
         s_col1, s_col2 = st.columns(2)
 
         with s_col1:
-            csv_path_input = st.text_input(
-                "📊 Training CSV path",
-                placeholder=r"C:\Users\...\train.csv",
-                help="Full path to the CSV dataset file.",
-            )
+            if APP_MODE == "cloud":
+                # Show the resolved path (read-only) so user sees what will run
+                csv_path_input = st.text_input(
+                    "📊 Dataset path / GCS URI",
+                    value=_resolved_csv_path,
+                    help="Auto-filled from the upload above. Edit only if needed.",
+                )
+            else:
+                csv_path_input = st.text_input(
+                    "📊 Training CSV path",
+                    placeholder=r"C:\Users\...\train.csv",
+                    help="Full local path to the CSV dataset file.",
+                )
             eda_file_input = st.text_input(
                 "🔬 EDA file (optional)",
                 placeholder="notebooks/eda.ipynb",
