@@ -45,3 +45,6 @@ pyarrow>=14.0.0
 
 # ── GCS (dataset storage for Swarm) ───────────────────────────────────────────
 google-cloud-storage>=2.16.0
+
+# ── Agent Evaluation ──────────────────────────────────────────────────────────
+deepeval>=0.21.0

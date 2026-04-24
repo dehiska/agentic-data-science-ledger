@@ -496,6 +496,40 @@ def get_traces(
     return {"traces": traces, "count": len(traces), "run_ids": run_ids}
 
 
+# ── Agent Evaluation ───────────────────────────────────────────────────────────
+
+@app.post("/eval/swarm")
+def eval_swarm(body: dict):
+    """
+    Run evaluation metrics on a completed swarm result dict.
+
+    POST body: the full dict returned by /swarm/run.
+    Returns: evaluate_swarm() output (custom_metrics + deepeval_metrics + per_agent).
+    """
+    run_deepeval = body.pop("run_deepeval", False)
+    try:
+        from src.evaluation.evaluate_agents import evaluate_swarm
+        return evaluate_swarm(body, run_deepeval=run_deepeval)
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.post("/eval/autoresearch")
+def eval_autoresearch(body: dict):
+    """
+    Run evaluation metrics on a completed autoresearch result dict.
+
+    POST body: the full dict returned by /autoresearch/run.
+    Returns: evaluate_autoresearch() output.
+    """
+    run_deepeval = body.pop("run_deepeval", False)
+    try:
+        from src.evaluation.evaluate_agents import evaluate_autoresearch
+        return evaluate_autoresearch(body, run_deepeval=run_deepeval)
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("backend.api:app", host="0.0.0.0", port=8080, reload=True)

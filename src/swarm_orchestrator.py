@@ -34,10 +34,20 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _oprint(msg: str) -> None:
+    """Formatted print for the swarm orchestrator."""
+    print(f"[{_ts()}] [Swarm] {msg}", flush=True)
 
 # FLAML / XGBoost / LightGBM are not thread-safe when run concurrently in the
 # same process (they share internal thread-pool state).  This lock ensures only
@@ -72,11 +82,18 @@ class SwarmOrchestrator:
     ) -> Dict:
         run_id = run_id or uuid.uuid4().hex[:8]
 
+        print(f"\n{'='*64}", flush=True)
+        print(f"[{_ts()}]  SWARM ORCHESTRATOR  |  run_id={run_id}", flush=True)
+        print(f"{'='*64}", flush=True)
+        _oprint(f"CSV: {Path(csv_path).name}  |  goal: {goal}")
+
         # ── 1. Parse EDA file ──────────────────────────────────────────────────
         eda_meta: Dict = {}
         if eda_file and Path(eda_file).exists():
+            _oprint(f"Parsing EDA file: {Path(eda_file).name}")
             eda_meta = self._parse_eda(eda_file, run_id)
         elif eda_file:
+            _oprint(f"EDA file not found: {eda_file} — skipping")
             self._log(run_id, "swarm_orchestrator",
                       f"EDA file not found: {eda_file} — skipping EDA parse")
 
@@ -84,6 +101,7 @@ class SwarmOrchestrator:
         target_col = target_col or eda_meta.get("target_col")
         task_type  = task_type  or eda_meta.get("task_type", "classification")
 
+        _oprint(f"Target column: {target_col!r}  |  Task: {task_type}")
         self._log(run_id, "swarm_orchestrator",
                   f"Swarm AutoML starting — csv={Path(csv_path).name}, "
                   f"target={target_col}, task={task_type}, "
@@ -96,10 +114,13 @@ class SwarmOrchestrator:
                   })
 
         # ── 3. Load dataset ─────────────────────────────────────────────────────
+        _oprint(f"Loading dataset...")
         try:
             df = self._load_csv(csv_path, run_id)
         except Exception as e:
+            _oprint(f"ERROR loading CSV: {e}")
             return {"status": "error", "error": f"Failed to load CSV: {e}", "run_id": run_id}
+        _oprint(f"Dataset loaded: {len(df):,} rows x {len(df.columns)} cols")
 
         # Final target-column resolution (fall back to last col if still None)
         if target_col is None:
@@ -130,6 +151,10 @@ class SwarmOrchestrator:
         actual_workers = min(n_agents, max_parallel_agents, os.cpu_count() or 2)
 
         rows_per_chunk = math.ceil(n_rows / n_agents)
+        _oprint(
+            f"Topology: {n_rows:,} rows -> {n_agents} agents x ~{rows_per_chunk:,} rows"
+            f" | {actual_workers} parallel workers | budget={time_budget_per_agent}s/agent"
+        )
         self._log(run_id, "swarm_orchestrator",
                   f"Swarm topology: {n_rows:,} rows → {n_agents} agents × "
                   f"~{rows_per_chunk:,} rows | {actual_workers} parallel workers",
@@ -139,9 +164,11 @@ class SwarmOrchestrator:
                   })
 
         # ── 5. Split into stratified chunks ─────────────────────────────────────
+        _oprint(f"Splitting into {n_agents} stratified chunks...")
         chunks = self._split_stratified(df, target_col, task_type, n_agents, run_id)
 
         # ── 6. Run swarm workers in parallel ────────────────────────────────────
+        _oprint(f"Launching {n_agents} workers ({actual_workers} parallel)...")
         worker_results = self._run_workers(
             chunks=chunks,
             target_col=target_col,
@@ -152,17 +179,21 @@ class SwarmOrchestrator:
         )
 
         if not worker_results:
+            _oprint("ERROR: All workers failed — check traces for details.")
             return {
                 "status": "error",
                 "error": "All swarm workers failed — check traces for details.",
                 "run_id": run_id,
             }
 
+        _oprint(f"{len(worker_results)}/{n_agents} workers succeeded")
+
         # ── 7. Aggregate (divide-and-conquer tree merge) ────────────────────────
+        _oprint("Running two-level tournament (family -> global)...")
         best_global = self._aggregate(worker_results, run_id)
 
         self._log(run_id, "swarm_orchestrator",
-                  f"Swarm complete ✅ — champion: {best_global['name']} "
+                  f"Swarm complete -- champion: {best_global['name']} "
                   f"val_score={best_global['metrics'].get('val_score', '?'):.4f} "
                   f"({len(worker_results)}/{n_agents} agents succeeded)",
                   payload={
@@ -184,7 +215,7 @@ class SwarmOrchestrator:
             team_member=team_member,
         )
 
-        return {
+        swarm_result = {
             "status": "success",
             "run_id": run_id,
             "best_model": best_global,
@@ -198,6 +229,12 @@ class SwarmOrchestrator:
             "eda_meta": eda_meta,
             "flaml_available": best_global.get("flaml", False),
         }
+
+        # ── 9. Run evaluation + print final summary ──────────────────────────────
+        eval_result = self._evaluate_and_print(swarm_result, run_id)
+        swarm_result["eval"] = eval_result
+
+        return swarm_result
 
     # ── EDA parsing ────────────────────────────────────────────────────────────
 
@@ -418,8 +455,12 @@ class SwarmOrchestrator:
                         results.append(r)
                         bm = r["best_model"]
                         score = bm["metrics"].get("val_score", 0)
+                        _oprint(
+                            f"Worker {agent_id} done [{len(results)}/{n_agents}] -> "
+                            f"{bm['name']} val_score={score:.4f} flaml={bm.get('flaml', False)}"
+                        )
                         self._log(run_id, "swarm_orchestrator",
-                                  f"✅ Worker {agent_id + 1}/{n_agents} — "
+                                  f"Worker {agent_id + 1}/{n_agents} — "
                                   f"best: {bm['name']} val_score={score:.4f}",
                                   payload={
                                       "agent_id": agent_id,
@@ -428,12 +469,14 @@ class SwarmOrchestrator:
                                       "flaml": bm.get("flaml", False),
                                   })
                     else:
+                        _oprint(f"Worker {agent_id} FAILED: {r.get('error', '?')}")
                         self._log(run_id, "swarm_orchestrator",
-                                  f"⚠️ Worker {agent_id + 1}/{n_agents} failed: "
+                                  f"Worker {agent_id + 1}/{n_agents} failed: "
                                   f"{r.get('error', '?')}")
                 except Exception as exc:
+                    _oprint(f"Worker {agent_id} raised exception: {exc}")
                     self._log(run_id, "swarm_orchestrator",
-                              f"❌ Worker {agent_id + 1}/{n_agents} raised: {exc}")
+                              f"Worker {agent_id + 1}/{n_agents} raised: {exc}")
 
         return results
 
@@ -455,12 +498,14 @@ class SwarmOrchestrator:
 
         family_summary = {f: round(m["metrics"]["val_score"], 4)
                           for f, m in by_family.items()}
+        _oprint(f"Family winners: {family_summary}")
         self._log(run_id, "swarm_orchestrator",
                   f"Family winners: {family_summary}",
                   payload={"family_bests": family_summary})
 
         champion = max(by_family.values(),
                        key=lambda x: x["metrics"].get("val_score", 0.0))
+        _oprint(f"Champion -> {champion['name']} | val_score={champion['metrics'].get('val_score', '?'):.4f} | FLAML={champion.get('flaml', False)}")
         return champion
 
     # ── Ledger storage ─────────────────────────────────────────────────────────
@@ -508,6 +553,72 @@ class SwarmOrchestrator:
         except Exception as e:
             self._log(run_id, "swarm_orchestrator", f"Ledger store failed: {e}")
             return None
+
+    # ── Evaluation + final summary print ──────────────────────────────────────
+
+    def _evaluate_and_print(self, swarm_result: dict, run_id: str) -> dict:
+        """Run evaluation metrics and print the final summary banner."""
+        eval_result: dict = {}
+        try:
+            from src.evaluation.evaluate_agents import evaluate_swarm
+            # Skip DeepEval by default in production (needs API key + adds latency).
+            # Set env var DEEPEVAL_ENABLED=1 to enable it.
+            run_de = os.getenv("DEEPEVAL_ENABLED", "0") == "1"
+            eval_result = evaluate_swarm(swarm_result, run_deepeval=run_de)
+        except Exception as exc:
+            eval_result = {"error": str(exc)}
+
+        best = swarm_result.get("best_model", {})
+        metrics = best.get("metrics", {})
+        score = metrics.get("val_score", 0.0)
+        n_succeeded = swarm_result.get("n_succeeded", 0)
+        n_agents    = swarm_result.get("n_agents", 1)
+        flaml_count = sum(
+            1 for w in swarm_result.get("all_worker_results", [])
+            if w.get("best_model", {}).get("flaml", False)
+        )
+
+        # Custom metric statuses
+        custom = eval_result.get("custom_metrics", {})
+        overall = eval_result.get("overall_status", "?")
+
+        print(f"\n{'='*64}", flush=True)
+        print(f"[{_ts()}]  SWARM RESULT  |  run_id={run_id}", flush=True)
+        print(f"{'='*64}", flush=True)
+        print(f"  Champion     : {best.get('name', '?')}  ({best.get('family', '?')})", flush=True)
+        print(f"  Val score    : {score:.4f}", flush=True)
+        print(f"  Workers      : {n_succeeded}/{n_agents} succeeded  "
+              f"({100 * n_succeeded / max(n_agents, 1):.0f}%)", flush=True)
+        print(f"  FLAML used   : {flaml_count}/{n_succeeded} workers", flush=True)
+        print(f"  Dataset rows : {swarm_result.get('n_rows', '?'):,}", flush=True)
+        print(f"  Target       : {swarm_result.get('target_col', '?')} ({swarm_result.get('task_type', '?')})", flush=True)
+        if swarm_result.get("entry_id"):
+            print(f"  Ledger entry : #{swarm_result['entry_id']}", flush=True)
+
+        # Evaluation summary
+        print(f"\n  --- Evaluation ({overall}) ---", flush=True)
+        for metric_name, metric_val in custom.items():
+            if isinstance(metric_val, dict):
+                st = metric_val.get("status", "?")
+                note = metric_val.get("note", "")
+                print(f"  {metric_name:<26}: [{st}]  {note}", flush=True)
+
+        de = eval_result.get("deepeval_metrics")
+        if de and not de.get("error"):
+            print(f"\n  --- DeepEval (LLM-based) ---", flush=True)
+            for k in ("faithfulness", "answer_relevancy", "context_relevancy"):
+                v = de.get(k)
+                print(f"  {k:<26}: {v}", flush=True)
+        elif de and de.get("error"):
+            print(f"  DeepEval     : skipped ({de['error'][:60]})", flush=True)
+
+        print(f"{'='*64}\n", flush=True)
+
+        # Log eval to traces
+        self._log(run_id, "swarm_orchestrator",
+                  f"Evaluation complete — overall={overall}",
+                  payload=eval_result)
+        return eval_result
 
     # ── Utilities ──────────────────────────────────────────────────────────────
 

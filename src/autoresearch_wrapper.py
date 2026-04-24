@@ -24,7 +24,17 @@ import json
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from typing import Dict, Optional
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _arprint(msg: str) -> None:
+    """Formatted print for AutoResearcher."""
+    print(f"[{_ts()}] [AutoResearcher] {msg}", flush=True)
 
 
 class AutoResearchWrapper:
@@ -54,6 +64,12 @@ class AutoResearchWrapper:
 
         run_id = run_id or uuid.uuid4().hex[:8]
 
+        print(f"\n{'='*64}", flush=True)
+        print(f"[{_ts()}]  AUTO RESEARCHER  |  run_id={run_id}", flush=True)
+        print(f"{'='*64}", flush=True)
+        _arprint(f"Goal: {goal}")
+        _arprint(f"File: {file_path or '(none)'}  |  max_iter={max_iterations}  |  stratify={stratify}  |  plateau_stop={plateau_stop}")
+
         # Try to run autoresearch as a subprocess
         result = self._run_subprocess(file_path, goal, run_id, max_iterations, stratify)
         if result["status"] == "success":
@@ -81,9 +97,11 @@ class AutoResearchWrapper:
             "--output", "json",
         ]
         try:
+            _arprint("Attempting autoresearch subprocess...")
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if proc.returncode == 0:
                 best_model = self._parse_output(proc.stdout)
+                _arprint(f"Subprocess succeeded -> {best_model.get('name', '?')}")
                 if self.db:
                     self.db.log_trace(run_id, "autoresearcher",
                         "Autoresearch subprocess completed successfully.",
@@ -95,12 +113,16 @@ class AutoResearchWrapper:
                     "raw_output": proc.stdout[:2000],
                 }
             else:
+                _arprint("Subprocess not available — running simulation...")
                 return self._simulate(file_path, goal, run_id, max_iterations, stratify)
         except FileNotFoundError:
+            _arprint("autoresearch package not installed — running simulation...")
             return self._simulate(file_path, goal, run_id, max_iterations, stratify)
         except subprocess.TimeoutExpired:
+            _arprint("ERROR: subprocess timed out after 5 minutes")
             return {"status": "error", "error": "autoresearch timed out after 5 minutes.", "run_id": run_id}
         except Exception as e:
+            _arprint(f"ERROR: {e}")
             return {"status": "error", "error": str(e), "run_id": run_id}
 
     def _simulate(
@@ -140,6 +162,7 @@ class AutoResearchWrapper:
                                      "max_iter": 1000}},
         ]
 
+        _arprint(f"Simulation starting — {max_iterations} max iterations | plateau_stop={plateau_stop}")
         if self.db:
             self.db.log_trace(run_id, "autoresearcher",
                 f"Starting autoresearch — max {max_iterations} iterations, "
@@ -172,6 +195,10 @@ class AutoResearchWrapper:
                 best_f1 = f1
                 best_model = candidate
                 no_improve_count = 0
+                _arprint(f"Iter {i+1:>3}/{max_iterations} | {mp['name']:<28} f1={f1:.4f} acc={acc:.4f} ** NEW BEST **")
+            elif (i + 1) % 10 == 0:
+                # Print every 10 iterations even if no improvement
+                _arprint(f"Iter {i+1:>3}/{max_iterations} | {mp['name']:<28} f1={f1:.4f} acc={acc:.4f}  (no_improve={no_improve_count})")
             else:
                 no_improve_count += 1
 
@@ -187,11 +214,46 @@ class AutoResearchWrapper:
 
             # Plateau stop
             if no_improve_count >= plateau_stop:
+                _arprint(f"Plateau reached — {plateau_stop} iterations without improvement. Stopping at iter {iterations_run}.")
                 if self.db:
                     self.db.log_trace(run_id, "autoresearcher",
                         f"Plateau reached ({plateau_stop} iterations without improvement). Stopping.",
                         payload={"iterations_run": iterations_run, "best_f1": best_f1})
                 break
+
+        # ── Final summary print ────────────────────────────────────────────────
+        best_name = best_model['name'] if best_model else '?'
+        best_metrics = best_model.get('metrics', {}) if best_model else {}
+        print(f"\n{'='*64}", flush=True)
+        print(f"[{_ts()}]  AUTORESEARCHER RESULT  |  run_id={run_id}", flush=True)
+        print(f"{'='*64}", flush=True)
+        print(f"  Best model   : {best_name}", flush=True)
+        print(f"  F1 score     : {best_metrics.get('f1', '?')}", flush=True)
+        print(f"  Accuracy     : {best_metrics.get('accuracy', '?')}", flush=True)
+        print(f"  AUC-ROC      : {best_metrics.get('auc_roc', '?')}", flush=True)
+        print(f"  Iterations   : {iterations_run} (of {max_iterations} max)", flush=True)
+        print(f"  Params       : {best_model.get('params', {}) if best_model else {}}", flush=True)
+
+        # Run evaluation
+        ar_result_preview = {
+            "status": "success",
+            "best_model": best_model,
+            "run_id": run_id,
+            "iterations_run": iterations_run,
+            "simulated": True,
+            "all_models_tried": list({m["name"] for m in model_pool}),
+        }
+        try:
+            from src.evaluation.evaluate_agents import evaluate_autoresearch
+            eval_result = evaluate_autoresearch(ar_result_preview, run_deepeval=False)
+            overall = eval_result.get("overall_status", "?")
+            print(f"\n  --- Evaluation ({overall}) ---", flush=True)
+            for mname, mval in eval_result.get("custom_metrics", {}).items():
+                if isinstance(mval, dict):
+                    print(f"  {mname:<26}: [{mval.get('status','?')}]  {mval.get('note','')}", flush=True)
+        except Exception as exc:
+            print(f"  Evaluation   : skipped ({exc})", flush=True)
+        print(f"{'='*64}\n", flush=True)
 
         if self.db:
             self.db.log_trace(run_id, "autoresearcher",

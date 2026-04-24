@@ -1402,6 +1402,71 @@ with tab_swarm:
                 f"Run ID: `{run_id}` — full iteration trace in **🔍 Trace Log** tab"
             )
 
+        # ── Evaluation panel ──────────────────────────────────────────────────
+        eval_data = result.get("eval")
+        if eval_data is None and APP_MODE == "cloud":
+            # Fetch eval from backend if not embedded in result
+            try:
+                eval_data = api("POST", "/eval/swarm", json={**result, "run_deepeval": False})
+            except Exception:
+                eval_data = None
+
+        if eval_data:
+            _STATUS_ICON = {"PASS": "✅", "PARTIAL": "⚠️", "FAIL": "❌", "NOT_EVALUATED": "—"}
+            overall = eval_data.get("overall_status", "?")
+            overall_icon = _STATUS_ICON.get(overall, "?")
+
+            with st.expander(f"🔬 Agent Evaluation — {overall_icon} {overall}", expanded=False):
+                st.caption(
+                    "Tier 1 = pure-Python metrics (no API cost). "
+                    "Tier 2 = DeepEval LLM-based (enable with DEEPEVAL_ENABLED=1 env var)."
+                )
+                custom = eval_data.get("custom_metrics", {})
+                if custom:
+                    st.subheader("Tier 1 — Custom Metrics")
+                    c_rows = []
+                    for mname, mval in custom.items():
+                        if isinstance(mval, dict):
+                            c_rows.append({
+                                "Metric":  mname.replace("_", " ").title(),
+                                "Status":  f"{_STATUS_ICON.get(mval.get('status','?'), '?')} {mval.get('status','?')}",
+                                "Details": mval.get("note", ""),
+                            })
+                    if c_rows:
+                        import pandas as _epd
+                        st.dataframe(_epd.DataFrame(c_rows), use_container_width=True, hide_index=True)
+
+                per_agent = eval_data.get("per_agent", {})
+                if per_agent:
+                    st.subheader("Per-Agent Breakdown")
+                    pa_rows = []
+                    for agent_name, agent_data in per_agent.items():
+                        pa_rows.append({
+                            "Agent":     agent_name,
+                            "Status":    f"{_STATUS_ICON.get(agent_data.get('status','?'),'?')} {agent_data.get('status','?')}",
+                            "Model":     agent_data.get("model") or agent_data.get("champion_model", "—"),
+                            "Score":     agent_data.get("val_score") or agent_data.get("champion_score", "—"),
+                            "FLAML":     "✅" if agent_data.get("flaml") else "—",
+                        })
+                    import pandas as _epd2
+                    st.dataframe(_epd2.DataFrame(pa_rows), use_container_width=True, hide_index=True)
+
+                de = eval_data.get("deepeval_metrics")
+                if de and not de.get("error"):
+                    st.subheader("Tier 2 — DeepEval (LLM-based)")
+                    de_cols = st.columns(3)
+                    for i, key in enumerate(("faithfulness", "answer_relevancy", "context_relevancy")):
+                        val = de.get(key)
+                        label = key.replace("_", " ").title()
+                        icon = "✅" if (val is not None and val >= 0.5) else ("❌" if val is not None else "—")
+                        de_cols[i].metric(label, f"{val:.4f}" if val is not None else "N/A", delta=icon)
+                    reasons = de.get("reasons", {})
+                    if reasons:
+                        with st.expander("Reasons"):
+                            st.json(reasons)
+                elif de and de.get("error"):
+                    st.info(f"DeepEval: {de['error']}")
+
     # ── Launch & render ────────────────────────────────────────────────────────
     if launch_btn:
         if not csv_path_input.strip():
