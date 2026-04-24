@@ -245,7 +245,7 @@ class AutoResearchWrapper:
         }
         try:
             from src.evaluation.evaluate_agents import evaluate_autoresearch
-            eval_result = evaluate_autoresearch(ar_result_preview, run_deepeval=False)
+            eval_result = evaluate_autoresearch(ar_result_preview, run_deepeval=True)
             overall = eval_result.get("overall_status", "?")
             print(f"\n  --- Evaluation ({overall}) ---", flush=True)
             for mname, mval in eval_result.get("custom_metrics", {}).items():

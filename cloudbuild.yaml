@@ -93,7 +93,7 @@ steps:
       - --cpu=2
       - --min-instances=0
       - --max-instances=3
-      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},OPENAI_API_KEY=${_ANTHROPIC_API_KEY},MAX_ROWS_PER_AGENT=150000,TIME_BUDGET_PER_AGENT=60,GCS_BUCKET=${_GCS_BUCKET}-$PROJECT_ID
+      - --set-env-vars=APP_MODE=${_APP_MODE},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_KEY=${_SUPABASE_KEY},ANTHROPIC_API_KEY=${_ANTHROPIC_API_KEY},MAX_ROWS_PER_AGENT=150000,TIME_BUDGET_PER_AGENT=60,GCS_BUCKET=${_GCS_BUCKET}-$PROJECT_ID
 
   # ── 7. Get backend URL and deploy frontend ───────────────────────────────────
   # Write URL to file first — avoids $VAR substitution validation in Cloud Build

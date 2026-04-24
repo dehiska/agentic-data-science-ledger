@@ -561,10 +561,9 @@ class SwarmOrchestrator:
         eval_result: dict = {}
         try:
             from src.evaluation.evaluate_agents import evaluate_swarm
-            # Skip DeepEval by default in production (needs API key + adds latency).
-            # Set env var DEEPEVAL_ENABLED=1 to enable it.
-            run_de = os.getenv("DEEPEVAL_ENABLED", "0") == "1"
-            eval_result = evaluate_swarm(swarm_result, run_deepeval=run_de)
+            # Always run DeepEval — the adapter returns a graceful error dict
+            # if ANTHROPIC_API_KEY is not set, so this is safe in all environments.
+            eval_result = evaluate_swarm(swarm_result, run_deepeval=True)
         except Exception as exc:
             eval_result = {"error": str(exc)}
 

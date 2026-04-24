@@ -1407,7 +1407,7 @@ with tab_swarm:
         if eval_data is None and APP_MODE == "cloud":
             # Fetch eval from backend if not embedded in result
             try:
-                eval_data = api("POST", "/eval/swarm", json={**result, "run_deepeval": False})
+                eval_data = api("POST", "/eval/swarm", json={**result, "run_deepeval": True})
             except Exception:
                 eval_data = None
 
@@ -1416,10 +1416,10 @@ with tab_swarm:
             overall = eval_data.get("overall_status", "?")
             overall_icon = _STATUS_ICON.get(overall, "?")
 
-            with st.expander(f"🔬 Agent Evaluation — {overall_icon} {overall}", expanded=False):
+            with st.expander(f"🔬 Agent Evaluation — {overall_icon} {overall}", expanded=True):
                 st.caption(
-                    "Tier 1 = pure-Python metrics (no API cost). "
-                    "Tier 2 = DeepEval LLM-based (enable with DEEPEVAL_ENABLED=1 env var)."
+                    "**Tier 1** — custom Python metrics (instant, no API cost).  "
+                    "**Tier 2** — DeepEval LLM-based metrics via Claude Haiku (requires ANTHROPIC_API_KEY on backend)."
                 )
                 custom = eval_data.get("custom_metrics", {})
                 if custom:

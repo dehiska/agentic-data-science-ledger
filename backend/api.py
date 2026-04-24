@@ -506,7 +506,7 @@ def eval_swarm(body: dict):
     POST body: the full dict returned by /swarm/run.
     Returns: evaluate_swarm() output (custom_metrics + deepeval_metrics + per_agent).
     """
-    run_deepeval = body.pop("run_deepeval", False)
+    run_deepeval = body.pop("run_deepeval", True)
     try:
         from src.evaluation.evaluate_agents import evaluate_swarm
         return evaluate_swarm(body, run_deepeval=run_deepeval)
@@ -522,7 +522,7 @@ def eval_autoresearch(body: dict):
     POST body: the full dict returned by /autoresearch/run.
     Returns: evaluate_autoresearch() output.
     """
-    run_deepeval = body.pop("run_deepeval", False)
+    run_deepeval = body.pop("run_deepeval", True)
     try:
         from src.evaluation.evaluate_agents import evaluate_autoresearch
         return evaluate_autoresearch(body, run_deepeval=run_deepeval)
