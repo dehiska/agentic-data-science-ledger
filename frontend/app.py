@@ -116,9 +116,15 @@ def delete_project_action(project_id: int):
         get_db_direct().delete_project(project_id)
 
 
-def parse_uploaded_file(uploaded, project_id):
+def parse_uploaded_file(uploaded, project_id, team_member: str = ""):
+    """Parse and store an uploaded file.
+
+    team_member is passed explicitly so the caller controls the value — not
+    read from session state here, which avoids Streamlit widget-state races.
+    """
     ext = Path(uploaded.name).suffix.lower()
     content = uploaded.getvalue()
+    _author = team_member.strip() or None
 
     if APP_MODE == "cloud":
         params = {}
@@ -126,17 +132,16 @@ def parse_uploaded_file(uploaded, project_id):
             params["project_id"] = project_id
         gh_repo = st.session_state.get("gh_repo", "").strip()
         gh_branch = st.session_state.get("gh_branch", "main").strip()
-        gh_user = st.session_state.get("gh_user", "").strip()
         if gh_repo:
             params["github_repo"] = gh_repo
             params["github_branch"] = gh_branch or "main"
-        if gh_user:
-            params["team_member"] = gh_user
+        if _author:
+            params["team_member"] = _author
         return api("POST", "/files/parse",
                    files={"file": (uploaded.name, content, "application/octet-stream")},
                    params=params)
 
-    # Phase 1: direct
+    # Phase 1: direct (local SQLite mode)
     from src.inference_engine import InferenceEngine
     mcp = get_mcp_direct()
     db = get_db_direct()
@@ -146,7 +151,7 @@ def parse_uploaded_file(uploaded, project_id):
     try:
         meta = mcp.parse_file(tmp_path)
         meta["file_path"] = uploaded.name
-        entry_id = mcp.store_in_db(meta, project_id=project_id)
+        entry_id = mcp.store_in_db(meta, project_id=project_id, team_member=_author)
         infer_result = InferenceEngine().infer(meta)
         db.update_ledger_entry(entry_id, {
             "auto_extracted": infer_result,
@@ -327,14 +332,11 @@ with tab_upload:
     with _up_col2:
         _upload_author = st.text_input(
             "Your GitHub Username ✱",
-            value=st.session_state.get("gh_user", ""),
             placeholder="e.g. dehiska",
             key="upload_author_field",
             help="Required — appears in the Leaderboard and Experiment Tree.",
         )
-        if _upload_author.strip():
-            st.session_state["gh_user"] = _upload_author.strip()
-        elif not st.session_state.get("gh_user"):
+        if not _upload_author.strip():
             st.warning("⚠️ Enter your GitHub username so your name appears in the Leaderboard.")
 
     upload_proj_id = upload_proj_options[upload_proj_label]
@@ -354,7 +356,8 @@ with tab_upload:
     if uploaded_files and st.button("📋 Parse All Files", type="primary"):
         for uploaded in uploaded_files:
             with st.spinner(f"Parsing {uploaded.name}..."):
-                result = parse_uploaded_file(uploaded, upload_proj_id)
+                result = parse_uploaded_file(uploaded, upload_proj_id,
+                                             team_member=_upload_author)
 
             if result and result.get("status") == "ok":
                 ftype = result.get("file_type", "?")
@@ -969,6 +972,13 @@ with tab_plan:
     else:
         selected_file = st.selectbox("Select file for planning", file_options, key="plan_file_select")
 
+        _plan_author = st.text_input(
+            "Your GitHub Username",
+            placeholder="e.g. dehiska",
+            key="plan_author_field",
+            help="Tags this plan run with your name in the Leaderboard.",
+        )
+
         if st.button("🚀 Generate Plan", type="primary", key="btn_generate_plan"):
             with st.spinner("Running multi-agent pipeline..."):
                 if APP_MODE == "cloud":
@@ -977,7 +987,7 @@ with tab_plan:
                         "project_id": selected_project_id,
                         "repo_name": st.session_state.get("gh_repo") or None,
                         "branch": st.session_state.get("gh_branch", "main"),
-                        "team_member": st.session_state.get("gh_user") or None,
+                        "team_member": _plan_author.strip() or None,
                         "execute_autoresearch": execute_ar,
                     })
                 else:
@@ -1284,13 +1294,10 @@ with tab_swarm:
         with _swarm_author_col:
             _swarm_author = st.text_input(
                 "Your GitHub Username ✱",
-                value=st.session_state.get("gh_user", ""),
                 placeholder="e.g. dehiska",
                 key="swarm_author_field",
                 help="Tags the swarm ledger entry with your name in the Leaderboard.",
             )
-            if _swarm_author.strip():
-                st.session_state["gh_user"] = _swarm_author.strip()
         with _swarm_goal_col:
             swarm_goal = st.text_input(
                 "🎯 Goal",
@@ -1498,7 +1505,7 @@ with tab_swarm:
                         "max_rows_per_agent": int(max_rows),
                         "max_parallel_agents": max_parallel,
                         "project_id": _swarm_proj_id,
-                        "team_member": st.session_state.get("gh_user") or None,
+                        "team_member": _swarm_author.strip() or None,
                         "goal": swarm_goal,
                     })
                 else:
@@ -1513,7 +1520,7 @@ with tab_swarm:
                         max_rows_per_agent=int(max_rows),
                         max_parallel_agents=max_parallel,
                         project_id=_swarm_proj_id,
-                        team_member=st.session_state.get("gh_user") or None,
+                        team_member=_swarm_author.strip() or None,
                         goal=swarm_goal,
                     )
 
