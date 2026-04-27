@@ -1,4 +1,4 @@
-"""
+﻿"""
 SwarmWorkerAgent — one leaf node in the divide-and-conquer swarm.
 
 Called by SwarmOrchestrator._run_workers() inside a ThreadPoolExecutor.
@@ -10,19 +10,9 @@ Falls back to scikit-learn cross-validation if FLAML is not installed
 """
 
 import uuid
-from datetime import datetime
 from typing import Dict, List, Optional
 
 import pandas as pd
-
-
-def _ts() -> str:
-    return datetime.now().strftime("%H:%M:%S")
-
-
-def _wprint(agent_id: int, msg: str) -> None:
-    """Formatted print for a swarm worker."""
-    print(f"  [{_ts()}] [Worker {agent_id}] {msg}", flush=True)
 
 
 class SwarmWorkerAgent:
@@ -65,7 +55,6 @@ class SwarmWorkerAgent:
         agent_label = f"swarm_worker_{agent_id}"
         n_rows = len(chunk)
 
-        _wprint(agent_id, f"Starting — {n_rows:,} rows | target={target_col!r} | task={task_type} | budget={time_budget}s")
         self._log(run_id, agent_label,
                   f"Worker {agent_id} starting — {n_rows:,} rows, "
                   f"target={target_col}, task={task_type}, budget={time_budget}s")
@@ -74,36 +63,23 @@ class SwarmWorkerAgent:
         try:
             X, y = self._prepare_features(chunk, target_col)
         except Exception as e:
-            _wprint(agent_id, f"ERROR in feature prep: {e}")
             return {"status": "error",
                     "error": f"Feature prep failed: {e}",
                     "agent_id": agent_id, "run_id": run_id}
 
-        _wprint(agent_id, f"Feature matrix ready: {X.shape[0]:,} rows x {X.shape[1]} features")
         self._log(run_id, agent_label,
                   f"Worker {agent_id} feature matrix: "
                   f"{X.shape[0]:,} rows × {X.shape[1]} features")
 
         # ── Try FLAML first ────────────────────────────────────────────────────
-        _wprint(agent_id, "Running FLAML AutoML...")
         result = self._run_flaml(X, y, task_type, time_budget,
                                  run_id, agent_label, agent_id)
         if result["status"] == "ok":
-            bm = result["best_model"]
-            _wprint(agent_id,
-                    f"FLAML done -> {bm['name']} | val_score={bm['metrics'].get('val_score', '?'):.4f}")
             return result
 
         # ── Sklearn fallback ───────────────────────────────────────────────────
-        _wprint(agent_id, "FLAML unavailable — falling back to sklearn grid search")
-        res = self._run_sklearn_fallback(X, y, task_type, run_id, agent_label, agent_id)
-        if res["status"] == "ok":
-            bm = res["best_model"]
-            _wprint(agent_id,
-                    f"sklearn fallback done -> {bm['name']} | val_score={bm['metrics'].get('val_score', '?'):.4f}")
-        else:
-            _wprint(agent_id, f"ERROR: {res.get('error', '?')}")
-        return res
+        return self._run_sklearn_fallback(X, y, task_type,
+                                          run_id, agent_label, agent_id)
 
     # ── Feature preparation ────────────────────────────────────────────────────
 
